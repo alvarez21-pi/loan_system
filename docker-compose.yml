@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: loan_system
+      POSTGRES_USER: loanuser
+      POSTGRES_PASSWORD: changeme
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  backend:
+    build: ./backend
+    ports:
+      - "5000:5000"
+    environment:
+      DATABASE_URL: postgresql://loanuser:changeme@db:5432/loan_system
+      JWT_SECRET_KEY: change-this-secret-in-production
+      EMAIL_SERVICE_URL: http://email-service:80/index.php
+      EMAIL_SERVICE_SECRET: change-this-email-secret
+      FRONTEND_URL: http://localhost:3000
+    depends_on:
+      - db
+      - email-service
+
+  email-service:
+    build: ./email-service
+    ports:
+      - "8080:80"
+    env_file:
+      - ./email-service/.env
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

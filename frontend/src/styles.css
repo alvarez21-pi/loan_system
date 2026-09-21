@@ -1,0 +1,270 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Loan Management System design tokens.
+ * All colors are semantic tokens in oklch. Never hardcode colors in components.
+ */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-muted: var(--sidebar-muted);
+  --color-sidebar-active: var(--sidebar-active);
+  --color-sidebar-border: var(--sidebar-border);
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --shadow-card: 0 1px 2px oklch(0.2 0.03 250 / 0.06), 0 8px 24px oklch(0.2 0.03 250 / 0.05);
+}
+
+:root {
+  --radius: 0.5rem;
+  --background: oklch(0.975 0.005 240);
+  --foreground: oklch(0.24 0.03 250);
+  --surface: oklch(1 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.24 0.03 250);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.24 0.03 250);
+  --primary: oklch(0.48 0.11 215);
+  --primary-foreground: oklch(0.99 0.005 240);
+  --secondary: oklch(0.95 0.01 240);
+  --secondary-foreground: oklch(0.3 0.03 250);
+  --muted: oklch(0.955 0.008 240);
+  --muted-foreground: oklch(0.53 0.02 250);
+  --accent: oklch(0.93 0.03 215);
+  --accent-foreground: oklch(0.3 0.05 230);
+  --destructive: oklch(0.55 0.19 26);
+  --destructive-foreground: oklch(0.99 0.005 240);
+  --success: oklch(0.55 0.12 155);
+  --success-foreground: oklch(0.99 0.005 240);
+  --warning: oklch(0.72 0.14 75);
+  --warning-foreground: oklch(0.25 0.05 75);
+  --info: oklch(0.58 0.1 250);
+  --info-foreground: oklch(0.99 0.005 240);
+  --border: oklch(0.9 0.01 245);
+  --input: oklch(0.89 0.012 245);
+  --ring: oklch(0.48 0.11 215);
+  --sidebar: oklch(0.26 0.04 250);
+  --sidebar-foreground: oklch(0.93 0.01 240);
+  --sidebar-muted: oklch(0.68 0.02 245);
+  --sidebar-active: oklch(0.36 0.07 220);
+  --sidebar-border: oklch(0.34 0.03 250);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.01em;
+  }
+}
+
+@layer components {
+  .lms-card {
+    background-color: var(--color-card);
+    color: var(--color-card-foreground);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-card);
+  }
+
+  .lms-label {
+    display: block;
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-muted-foreground);
+    margin-bottom: 0.35rem;
+  }
+
+  .lms-input {
+    width: 100%;
+    background-color: var(--color-surface);
+    color: var(--color-foreground);
+    border: 1px solid var(--color-input);
+    border-radius: var(--radius-md);
+    padding: 0.55rem 0.7rem;
+    font-size: 0.9rem;
+    outline: none;
+  }
+  .lms-input:focus {
+    border-color: var(--color-ring);
+    box-shadow: 0 0 0 3px oklch(from var(--color-ring) l c h / 0.18);
+  }
+  .lms-input[aria-invalid="true"] {
+    border-color: var(--color-destructive);
+  }
+
+  .lms-error {
+    font-size: 0.78rem;
+    color: var(--color-destructive);
+    margin-top: 0.25rem;
+  }
+
+  .lms-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    border-radius: var(--radius-md);
+    padding: 0.55rem 0.95rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: opacity 0.15s ease, background-color 0.15s ease;
+  }
+  .lms-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .lms-btn-primary {
+    background-color: var(--color-primary);
+    color: var(--color-primary-foreground);
+  }
+  .lms-btn-primary:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+  .lms-btn-outline {
+    background-color: var(--color-surface);
+    color: var(--color-foreground);
+    border-color: var(--color-border);
+  }
+  .lms-btn-outline:hover:not(:disabled) {
+    background-color: var(--color-muted);
+  }
+  .lms-btn-success {
+    background-color: var(--color-success);
+    color: var(--color-success-foreground);
+  }
+  .lms-btn-danger {
+    background-color: var(--color-destructive);
+    color: var(--color-destructive-foreground);
+  }
+
+  .lms-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+  }
+  .lms-table thead th {
+    text-align: left;
+    padding: 0.6rem 0.85rem;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-muted-foreground);
+    background-color: var(--color-muted);
+    border-bottom: 1px solid var(--color-border);
+    white-space: nowrap;
+  }
+  .lms-table tbody td {
+    padding: 0.65rem 0.85rem;
+    border-bottom: 1px solid var(--color-border);
+    vertical-align: middle;
+  }
+  .lms-table tbody tr:hover {
+    background-color: var(--color-muted);
+  }
+
+  .lms-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    border: 1px solid transparent;
+  }
+  .lms-badge-neutral {
+    background-color: var(--color-muted);
+    color: var(--color-muted-foreground);
+    border-color: var(--color-border);
+  }
+  .lms-badge-info {
+    background-color: oklch(from var(--color-info) l c h / 0.12);
+    color: var(--color-info);
+    border-color: oklch(from var(--color-info) l c h / 0.3);
+  }
+  .lms-badge-warning {
+    background-color: oklch(from var(--color-warning) l c h / 0.16);
+    color: oklch(0.48 0.12 75);
+    border-color: oklch(from var(--color-warning) l c h / 0.35);
+  }
+  .lms-badge-success {
+    background-color: oklch(from var(--color-success) l c h / 0.13);
+    color: var(--color-success);
+    border-color: oklch(from var(--color-success) l c h / 0.3);
+  }
+  .lms-badge-danger {
+    background-color: oklch(from var(--color-destructive) l c h / 0.12);
+    color: var(--color-destructive);
+    border-color: oklch(from var(--color-destructive) l c h / 0.3);
+  }
+
+  .lms-nav-link {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.55rem 0.75rem;
+    border-radius: var(--radius-md);
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--color-sidebar-muted);
+  }
+  .lms-nav-link:hover {
+    background-color: oklch(from var(--color-sidebar-active) l c h / 0.5);
+    color: var(--color-sidebar-foreground);
+  }
+  .lms-nav-link-active {
+    background-color: var(--color-sidebar-active);
+    color: var(--color-sidebar-foreground);
+  }
+}

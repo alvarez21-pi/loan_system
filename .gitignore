@@ -1,0 +1,25 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+.output/
+vendor/
+.pytest_cache/
+
+# Temporary and archive files
+.tmp-*/
+*.zip
+
+# Local tooling
+.vscode/
