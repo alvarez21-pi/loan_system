@@ -1,0 +1,11 @@
+# Without this, `COPY . .` (after `composer install` already built a
+# fresh vendor/ for the image) would layer the HOST's own vendor/ on top.
+# test_branding.php is a manual dev-only check (see its own docblock) —
+# harmless to ship, but it doesn't need to; excluded for the same reason.
+vendor/
+test_branding.php
+.env
+.env.*
+!.env.example
+*.log
+.git

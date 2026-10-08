@@ -20,6 +20,34 @@ vendor/
 # Temporary and archive files
 .tmp-*/
 *.zip
+*.log
+
+# Local-testing scratch: raw test-run captures, screenshots, and session/
+# phase report write-ups — never the real docs (README, DEPLOYMENT.md,
+# PRD.md, ARCHITECTURE.md, DESIGN.md, docs/design-system.md etc).
+screenshots/
+*_REPORT.md
+*_REPORT_*.md
+SESSION_REPORT*.md
+docs/*-before.txt
+docs/*-after.txt
+docs/*-baseline.txt
+docs/phase-reports.md
+docs/review-findings.md
 
 # Local tooling
 .vscode/
+
+# Uploaded borrower files
+backend/uploads/
+
+# Phase 2 item 11: database backups/dumps and private keys — no backup
+# convention exists yet, but these are cheap to exclude preventively before
+# one does.
+*.sql
+*.sql.gz
+*.dump
+*.bak
+backups/
+*.pem
+*.key

@@ -33,7 +33,7 @@
 - `backend/services/email_client.py`: internal email-service HTTP client.
 - `backend/services/approval.py`: approval-domain service location; route integration is still required.
 - `backend/migrations/`: Alembic migration environment and schema revisions.
-- `backend/seed_admin.py`: creates the first administrator when none exists.
+- `backend/seed_ceo.py`: creates the first ceo account when none exists.
 
 ## 3. Frontend Files
 
@@ -127,7 +127,7 @@ Implemented currently:
 ## 6. Business Rules To Implement
 
 - Require JWT on all operational endpoints.
-- Enforce roles: `admin`, `maker`, and `checker`.
+- Enforce roles: `ceo`, `manager`, `checker`, and `maker`.
 - Enforce maker-checker: the creator cannot approve or reject their own record.
 - Set new loan, expense, payroll, and penalty records to a pending status.
 - Record approving/rejecting user and timestamp.

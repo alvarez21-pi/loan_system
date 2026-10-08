@@ -10,6 +10,8 @@ import {
 import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
+import { BrandingEffects } from "../components/BrandingEffects";
+import { EnvironmentBanner } from "../components/EnvironmentBanner";
 import { reportApplicationError } from "../lib/application-error-reporting";
 
 function NotFoundComponent() {
@@ -118,8 +120,21 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <Outlet />
+      {/* The banner (if shown) is a normal-flow sibling, not an overlay, so
+          it never covers anything — this flex column is what gives
+          AppShell (h-full, below) the correct REMAINING height instead of
+          AppShell's own h-screen overflowing the viewport by the banner's
+          height. A public page (login, etc.) that uses its own
+          min-h-screen still renders fine here; it simply isn't clipped,
+          since this wrapper doesn't force overflow:hidden. */}
+      <div className="flex h-screen flex-col">
+        <BrandingEffects />
+        <EnvironmentBanner />
+        <div className="min-h-0 flex-1">
+          {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+          <Outlet />
+        </div>
+      </div>
     </QueryClientProvider>
   );
 }

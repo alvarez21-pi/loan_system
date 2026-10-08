@@ -1,0 +1,47 @@
+# Local development only. `docker compose up --build` merges this file
+# with docker-compose.yml automatically (standard Compose behavior — no
+# extra flags needed). docker-compose.yml itself is untouched, and
+# docker-compose.prod.yml (Coolify) never reads this file at all, so
+# nothing here affects production.
+#
+# What this adds on top of the plain docker-compose.yml:
+#   1. Mailpit — catches every email the app sends; nothing can reach a
+#      real mailbox. Web UI: http://localhost:8025
+#   2. The backend now runs its migrations and the idempotent CEO seed
+#      automatically on first start (reusing backend/docker-entrypoint.
+#      prod.sh — the exact same script docker-compose.prod.yml already
+#      uses, not a new one), so there's nothing to run by hand before you
+#      can log in.
+services:
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"  # web UI — view caught emails here
+      # SMTP (1025) is intentionally NOT published to the host — only
+      # email-service needs to reach it, over the compose network at
+      # mailpit:1025.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8025/api/v1/info"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  email-service:
+    depends_on:
+      mailpit:
+        condition: service_healthy
+
+  backend:
+    # Same migrate -> seed -> serve sequence docker-compose.prod.yml uses
+    # (backend/docker-entrypoint.prod.sh), so the CEO account named in
+    # .env exists the first time the stack comes up here too — nothing
+    # to exec into the container and run by hand for local testing.
+    entrypoint: ["sh", "docker-entrypoint.prod.sh"]
+    environment:
+      # Compose only passes a variable INTO the container when it's listed
+      # here — .env alone isn't enough. ALLOW_DEMO_SEED lives ONLY in this
+      # local-only override file; docker-compose.prod.yml never lists it,
+      # so scripts/seed_demo_users.py structurally cannot run there even if
+      # .env's contents were ever copied onto a real deployment by mistake.
+      ALLOW_DEMO_SEED: ${ALLOW_DEMO_SEED:-}

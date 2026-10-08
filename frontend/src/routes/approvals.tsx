@@ -1,25 +1,20 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import AppShell from "../components/AppShell";
-import {
-  Button,
-  Card,
-  DataTable,
-  Notice,
-  PageHeader,
-  StatusBadge,
-  money,
-} from "../components/lms-ui";
+import { Button, Card, DataTable, InlineNote, PageHeader, StatusBadge, fmtNumber, money, percent } from "../components/lms-ui";
+import { LeaveDecisionModal } from "../components/LeaveDecisionModal";
+import useAutoRefresh from "../hooks/useAutoRefresh.js";
 import useResource from "../hooks/useResource.js";
-import { errorMessage, expenses, loans, payroll, penalties } from "../lib/api";
+import { errorMessage, getUser, hasPermission, leaveRequests, loans, penalties } from "../lib/api";
+import { showToast } from "../lib/toast";
 
 export const Route = createFileRoute("/approvals")({
   head: () => ({
     meta: [
       { title: "Approvals — Microfinance LMS" },
-      { name: "description", content: "Approve or reject pending loans, expenses, payroll batches and penalties." },
+      { name: "description", content: "Decide pending loans, penalties and leave requests." },
       { property: "og:title", content: "Approvals — Microfinance LMS" },
-      { property: "og:description", content: "Maker-checker approval queue for loans, expenses, payroll and penalties." },
+      { property: "og:description", content: "Aggregated approval queue: loans, penalties and leave." },
     ],
   }),
   component: () => (
@@ -30,51 +25,59 @@ export const Route = createFileRoute("/approvals")({
 });
 
 const PENDING = /pending|submitted|awaiting|review/i;
-const isPending = (row: any) => PENDING.test(String(row.status || ""));
+// Same rule the module pages use: pending AND the backend says this user may decide it.
+const decidable = (row: any) => PENDING.test(String(row.status || "")) && row.can_decide;
 
+// Expenses, payroll and employees are no longer maker-checker (Part 1.1) —
+// they are recorded/finalized directly on their own pages, not here. Only
+// loans, penalties and leave requests still go through a decision.
 function ApprovalsPage() {
-  const [message, setMessage] = useState("");
-  const [failure, setFailure] = useState("");
+  const user = getUser();
   const [busyKey, setBusyKey] = useState("");
+  const [reviewingLeave, setReviewingLeave] = useState<any>(null);
 
   const loanQueue = useResource(() => loans.list(), []);
-  const expenseQueue = useResource(() => expenses.list(), []);
-  const payrollQueue = useResource(() => payroll.list(), []);
   const penaltyQueue = useResource(() => penalties.list(), []);
+  const leaveQueue = useResource(() => leaveRequests.list(), []);
 
-  async function act(kind: string, api: any, resource: any, id: any, decision: "approve" | "reject") {
-    setMessage("");
-    setFailure("");
-    setBusyKey(`${kind}-${id}-${decision}`);
+  useAutoRefresh(() => {
+    loanQueue.reload();
+    penaltyQueue.reload();
+    leaveQueue.reload();
+  });
+
+  async function act(kind: string, key: string, api: any, resource: any, row: any, decision: "approve" | "reject", consequence: string) {
+    const question = decision === "approve" ? `${consequence} Approve?` : `${consequence.replace(/^This will approve/, "This will reject")} Are you sure?`;
+    if (!window.confirm(question)) return;
+    let rejection_reason: string | undefined;
+    if (decision === "reject") {
+      rejection_reason = window.prompt("Reason for rejection:") || undefined;
+      if (!rejection_reason) return;
+    }
+    setBusyKey(`${key}-${row.id}`);
     try {
-      await api[decision](id);
-      setMessage(`${kind} #${id} ${decision === "approve" ? "approved" : "rejected"}.`);
+      // leave requests take the reason as a bare argument, everything else as { rejection_reason }
+      if (kind === "Leave request") await api[decision](row.id, decision === "reject" ? rejection_reason : undefined);
+      else await api[decision](row.id, decision === "reject" ? { rejection_reason } : undefined);
+      showToast(`${kind} ${decision === "approve" ? "approved" : "rejected"}.`, "success");
       resource.reload();
     } catch (error) {
-      setFailure(errorMessage(error));
+      showToast(errorMessage(error), "danger");
     } finally {
       setBusyKey("");
     }
   }
 
-  function decisionColumn(kind: string, api: any, resource: any) {
+  function decisionColumn(kind: string, key: string, api: any, resource: any, describe: (row: any) => string) {
     return {
       key: "decision",
       label: "Decision",
       render: (row: any) => (
         <div className="flex gap-2">
-          <Button
-            variant="primary"
-            disabled={busyKey.startsWith(`${kind}-${row.id}-`)}
-            onClick={() => act(kind, api, resource, row.id, "approve")}
-          >
+          <Button disabled={busyKey === `${key}-${row.id}`} onClick={() => act(kind, key, api, resource, row, "approve", describe(row))}>
             Approve
           </Button>
-          <Button
-            variant="outline"
-            disabled={busyKey.startsWith(`${kind}-${row.id}-`)}
-            onClick={() => act(kind, api, resource, row.id, "reject")}
-          >
+          <Button variant="outline" disabled={busyKey === `${key}-${row.id}`} onClick={() => act(kind, key, api, resource, row, "reject", describe(row))}>
             Reject
           </Button>
         </div>
@@ -82,92 +85,97 @@ function ApprovalsPage() {
     };
   }
 
-  const loanRows = (loanQueue.data || []).filter(isPending);
-  const expenseRows = (expenseQueue.data || []).filter(isPending);
-  const payrollRows = (payrollQueue.data || []).filter(isPending);
-  const penaltyRows = (penaltyQueue.data || []).filter(isPending);
-  const total = loanRows.length + expenseRows.length + payrollRows.length + penaltyRows.length;
+  const loanRows = (loanQueue.data || []).filter(decidable);
+  const penaltyRows = (penaltyQueue.data || []).filter(decidable);
+  const leaveRows = (leaveQueue.data || []).filter(decidable);
+  const total = loanRows.length + penaltyRows.length + leaveRows.length;
 
   return (
     <>
       <PageHeader
         title="Approvals"
-        description={`${total} items waiting for a decision. Maker-checker applies: you cannot approve what you created.`}
+        description={`${fmtNumber(total)} item${total === 1 ? "" : "s"} waiting for your decision.`}
       />
-      <Notice tone="success">{message}</Notice>
-      <Notice tone="danger">{failure}</Notice>
-      <Notice tone="danger">
-        {loanQueue.error || expenseQueue.error || payrollQueue.error || penaltyQueue.error}
-      </Notice>
+      <InlineNote tone="danger">{loanQueue.error || penaltyQueue.error || leaveQueue.error}</InlineNote>
 
       <div className="space-y-4">
-        <Card title="Loans" description={`${loanRows.length} pending`}>
-          <DataTable
-            rows={loanRows}
-            empty={loanQueue.loading ? "Loading…" : "No loans waiting for approval."}
-            columns={[
-              { key: "id", label: "Loan" },
-              {
-                key: "borrower_name",
-                label: "Borrower",
-                render: (r: any) => r.borrower_name || r.borrower?.name || "—",
-              },
-              { key: "principal_amount", label: "Principal", render: (r: any) => money(r.principal_amount) },
-              { key: "term_months", label: "Term" },
-              { key: "status", label: "Status", render: (r: any) => <StatusBadge status={r.status} /> },
-              decisionColumn("Loan", loans, loanQueue),
-            ]}
-          />
-        </Card>
+        {hasPermission(user, "loans:approve") ? (
+          <Card title="Loans" description={`${fmtNumber(loanRows.length)} pending`}>
+            <DataTable
+              rows={loanRows}
+              empty={loanQueue.loading ? "Loading…" : "No loans waiting for approval."}
+              columns={[
+                {
+                  key: "loan",
+                  label: "Loan",
+                  render: (r: any) => (
+                    <Link to="/loans/$id" params={{ id: String(r.id) }} className="text-primary underline">
+                      #{r.id}
+                    </Link>
+                  ),
+                },
+                { key: "borrower_name", label: "Borrower" },
+                { key: "principal_amount", label: "Principal", render: (r: any) => money(r.principal_amount) },
+                { key: "interest_rate", label: "Monthly Rate (%)", render: (r: any) => percent(r.interest_rate) },
+                { key: "term_months", label: "Term (months)", render: (r: any) => fmtNumber(r.term_months) },
+                { key: "creator_name_snapshot", label: "Created by" },
+                decisionColumn("Loan", "loan", loans, loanQueue, (r) =>
+                  `This will approve Loan #${r.id} for ${r.borrower_name}: ${money(r.principal_amount)} at ${percent(r.interest_rate)} per month over ${fmtNumber(r.term_months)} months, and send the schedule to the borrower.`),
+              ]}
+            />
+          </Card>
+        ) : null}
 
-        <Card title="Expenses" description={`${expenseRows.length} pending`}>
-          <DataTable
-            rows={expenseRows}
-            empty={expenseQueue.loading ? "Loading…" : "No expenses waiting for approval."}
-            columns={[
-              { key: "id", label: "Ref" },
-              { key: "description", label: "Description" },
-              { key: "category", label: "Category" },
-              { key: "amount", label: "Amount", render: (r: any) => money(r.amount) },
-              { key: "status", label: "Status", render: (r: any) => <StatusBadge status={r.status} /> },
-              decisionColumn("Expense", expenses, expenseQueue),
-            ]}
-          />
-        </Card>
+        {hasPermission(user, "penalties:approve") ? (
+          <Card title="Penalties" description={`${fmtNumber(penaltyRows.length)} pending`}>
+            <DataTable
+              rows={penaltyRows}
+              empty={penaltyQueue.loading ? "Loading…" : "No penalties waiting for approval."}
+              columns={[
+                {
+                  key: "loan",
+                  label: "Loan",
+                  render: (r: any) => (
+                    <Link to="/loans/$id" params={{ id: String(r.loan_id) }} className="text-primary underline">
+                      #{r.loan_id} — {r.borrower_name}
+                    </Link>
+                  ),
+                },
+                { key: "amount", label: "Amount", render: (r: any) => money(r.amount) },
+                { key: "reason", label: "Reason" },
+                { key: "created_by_name", label: "Added by" },
+                decisionColumn("Penalty", "penalty", penalties, penaltyQueue, (r) =>
+                  `This will approve a ${money(r.amount)} penalty, adding it to Loan #${r.loan_id} (${r.borrower_name})'s outstanding balance.`),
+              ]}
+            />
+          </Card>
+        ) : null}
 
-        <Card title="Payroll" description={`${payrollRows.length} pending`}>
-          <DataTable
-            rows={payrollRows}
-            empty={payrollQueue.loading ? "Loading…" : "No payroll batches waiting for approval."}
-            columns={[
-              { key: "id", label: "Batch" },
-              { key: "period", label: "Period", render: (r: any) => r.period || r.month || "—" },
-              { key: "total_amount", label: "Total", render: (r: any) => money(r.total_amount) },
-              { key: "status", label: "Status", render: (r: any) => <StatusBadge status={r.status} /> },
-              decisionColumn("Payroll", payroll, payrollQueue),
-            ]}
-          />
-        </Card>
-
-        <Card title="Penalties" description={`${penaltyRows.length} pending`}>
-          <DataTable
-            rows={penaltyRows}
-            empty={penaltyQueue.loading ? "Loading…" : "No penalties waiting for approval."}
-            columns={[
-              { key: "id", label: "Ref" },
-              { key: "loan_id", label: "Loan" },
-              {
-                key: "borrower_name",
-                label: "Borrower",
-                render: (r: any) => r.borrower_name || r.borrower?.name || "—",
-              },
-              { key: "amount", label: "Amount", render: (r: any) => money(r.amount) },
-              { key: "reason", label: "Reason" },
-              decisionColumn("Penalty", penalties, penaltyQueue),
-            ]}
-          />
-        </Card>
+        {hasPermission(user, "leave:manage") ? (
+          <Card title="Leave requests" description={`${fmtNumber(leaveRows.length)} pending`}>
+            <DataTable
+              rows={leaveRows}
+              empty={leaveQueue.loading ? "Loading…" : "No leave requests waiting for approval."}
+              columns={[
+                { key: "employee_name", label: "Employee" },
+                { key: "leave_type", label: "Type" },
+                { key: "start_date", label: "From" },
+                { key: "end_date", label: "To" },
+                { key: "status", label: "Status", render: (r: any) => <StatusBadge status={r.status} /> },
+                {
+                  key: "decision",
+                  label: "Decision",
+                  render: (r: any) => <Button onClick={() => setReviewingLeave(r)}>Review</Button>,
+                },
+              ]}
+            />
+          </Card>
+        ) : null}
       </div>
+
+      {reviewingLeave ? (
+        <LeaveDecisionModal leave={reviewingLeave} onClose={() => setReviewingLeave(null)} onDecided={leaveQueue.reload} />
+      ) : null}
     </>
   );
 }

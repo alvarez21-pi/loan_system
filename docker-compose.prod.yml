@@ -1,0 +1,135 @@
+# Phase 6: production deployment, built for Coolify. Coolify's own proxy
+# terminates HTTPS and reaches the public service over Coolify's internal
+# network — there is deliberately no `ports:` mapping anywhere in this
+# file (compare docker-compose.yml, the local/dev file, which publishes
+# host ports for everything). Attach Coolify's domain to the **frontend**
+# service, port 3000 — see DEPLOYMENT.md for the full checklist.
+#
+# Every secret/config value comes from the environment (Coolify's own
+# "Environment Variables" panel sets these — see .env.example for the
+# full list and how to generate each secret; nothing here hardcodes a
+# real value). This file reuses that same .env.example rather than
+# duplicating it, and reuses the backend's existing startup-safety checks
+# (services/startup_safety.py) — they still run unconditionally inside
+# create_app() regardless of which compose file started the container.
+services:
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-loan_system}
+      POSTGRES_USER: ${POSTGRES_USER:-loanuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Coolify's environment variables}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-loanuser} -d ${POSTGRES_DB:-loan_system}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    mem_limit: 512m
+
+  email-service:
+    build: ./email-service
+    restart: unless-stopped
+    environment:
+      EMAIL_SERVICE_SECRET: ${EMAIL_SERVICE_SECRET:?Set EMAIL_SERVICE_SECRET in Coolify's environment variables}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_ENCRYPTION: ${SMTP_ENCRYPTION:-tls}
+      FROM_EMAIL: ${FROM_EMAIL:-}
+      FROM_NAME: ${FROM_NAME:-Microfinance LMS}
+      COMPANY_NAME: ${COMPANY_NAME:-Microfinance LMS}
+    healthcheck:
+      test: ["CMD", "curl", "-s", "-o", "/dev/null", "http://localhost:80/index.php"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    mem_limit: 256m
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    # Phase 6: migrate, then the idempotent CEO seed, THEN start serving —
+    # unattended, since no one exec's into a Coolify-managed container on
+    # every deploy the way the dev compose's manual procedure assumes
+    # (DEPLOYMENT.md). The dev docker-compose.yml is untouched — it still
+    # runs the Dockerfile's own gunicorn-only CMD and expects those two
+    # steps to be run by hand.
+    entrypoint: ["sh", "docker-entrypoint.prod.sh"]
+    environment:
+      # Fixed, not overridable from Coolify's panel — "backend under
+      # gunicorn with debug off" is a property of THIS file, not a
+      # configurable one. (The backend's own startup-safety check would
+      # refuse FLASK_DEBUG=true here regardless — this removes the
+      # footgun at the compose layer too, rather than relying only on
+      # that runtime check.)
+      ENVIRONMENT: production
+      FLASK_DEBUG: "false"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-loanuser}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Coolify's environment variables}@db:5432/${POSTGRES_DB:-loan_system}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in Coolify's environment variables}
+      EMAIL_SERVICE_URL: http://email-service:80/index.php
+      EMAIL_SERVICE_SECRET: ${EMAIL_SERVICE_SECRET:?Set EMAIL_SERVICE_SECRET in Coolify's environment variables}
+      FRONTEND_URL: ${FRONTEND_URL:?Set FRONTEND_URL in Coolify's environment variables — the real https:// domain Coolify attaches to the frontend service}
+      # Unset by default — no banner, exactly like the dev compose file.
+      # Set it in Coolify's panel ONLY on a staging deployment (Phase 7).
+      ENVIRONMENT_LABEL: ${ENVIRONMENT_LABEL:-}
+      USER_DELETION_RETENTION_DAYS: ${USER_DELETION_RETENTION_DAYS:-30}
+      CEO_NAME: ${CEO_NAME:?Set CEO_NAME in Coolify's environment variables}
+      CEO_EMAIL: ${CEO_EMAIL:?Set CEO_EMAIL in Coolify's environment variables}
+      CEO_PASSWORD: ${CEO_PASSWORD:?Set CEO_PASSWORD in Coolify's environment variables}
+      CEO_PHONE: ${CEO_PHONE:-255700000000}
+      UPLOAD_DIR: /app/uploads
+      # Phase 6: the nightly backup's own directory — a separate named
+      # volume (below), never /tmp, so it survives a redeploy.
+      BACKUP_DIR: /app/backups
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      COMPANY_NAME: ${COMPANY_NAME:-Microfinance LMS}
+      LOGO_URL: ${LOGO_URL:-}
+      VERIFICATION_TOKEN_TTL_HOURS: ${VERIFICATION_TOKEN_TTL_HOURS:-24}
+      PASSWORD_RESET_TTL_MINUTES: ${PASSWORD_RESET_TTL_MINUTES:-60}
+    volumes:
+      - uploads:/app/uploads
+      - backups:/app/backups
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/api/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    mem_limit: 768m
+    depends_on:
+      db:
+        condition: service_healthy
+      email-service:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        BACKEND_INTERNAL_URL: http://backend:5000
+    restart: unless-stopped
+    # No `ports:` — Coolify's proxy reaches this over its own network.
+    # Attach the domain to THIS service, port 3000.
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    mem_limit: 384m
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  uploads:
+  backups:

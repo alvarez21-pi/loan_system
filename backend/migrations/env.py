@@ -6,7 +6,12 @@ from flask import current_app
 from alembic import context
 
 config = context.config
-fileConfig(config.config_file_name)
+# disable_existing_loggers defaults to True, which would permanently disable
+# every logger not listed in alembic.ini's [loggers] section (e.g. Flask's
+# "app" logger) for the rest of the process the first time a migration runs
+# in-process alongside other code (as the test suite does) — silently
+# swallowing every app.logger call afterward with no error anywhere.
+fileConfig(config.config_file_name, disable_existing_loggers=False)
 logger = logging.getLogger("alembic.env")
 
 config.set_main_option(

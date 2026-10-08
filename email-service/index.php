@@ -14,7 +14,11 @@ $payload = json_decode(file_get_contents('php://input'), true);
 $type = $payload['type'] ?? '';
 $to = $payload['to'] ?? '';
 $data = $payload['data'] ?? [];
-$allowed = ['verification', 'password_reset', 'loan_approved', 'payment_reminder', 'payment_received', 'new_user_notice'];
+// Phase 4: the branding block the backend sends with every request — set
+// once here, read by every Email:: template instead of a hardcoded
+// constant/colour.
+Email::setCompany(is_array($payload['company'] ?? null) ? $payload['company'] : []);
+$allowed = ['verification', 'password_reset', 'loan_approved', 'payment_reminder', 'payment_received', 'new_user_notice', 'loan_schedule', 'payslip'];
 if (!filter_var($to, FILTER_VALIDATE_EMAIL) || !in_array($type, $allowed, true)) {
     http_response_code(400);
     echo json_encode(['error' => 'invalid type or recipient']);
@@ -28,6 +32,8 @@ $required = [
     'payment_reminder' => ['borrower_name', 'loan_reference', 'amount_due', 'due_date'],
     'payment_received' => ['borrower_name', 'loan_reference', 'amount_paid', 'balance_remaining', 'payment_date'],
     'new_user_notice' => ['name', 'role'],
+    'loan_schedule' => ['borrower_name', 'loan_reference', 'schedule'],
+    'payslip' => ['employee_name', 'month', 'pdf_base64', 'filename'],
 ];
 foreach ($required[$type] as $field) {
     if (!array_key_exists($field, $data)) {
@@ -44,6 +50,8 @@ $sent = match ($type) {
     'payment_reminder' => Email::sendPaymentReminderEmail($data['borrower_name'], $data['loan_reference'], $data['amount_due'], $data['due_date'], $to),
     'payment_received' => Email::sendPaymentReceivedConfirmation($data['borrower_name'], $data['loan_reference'], $data['amount_paid'], $data['balance_remaining'], $data['payment_date'], $to),
     'new_user_notice' => Email::sendNewUserCredentialsNotice($data['name'], $to, $data['role']),
+    'loan_schedule' => Email::sendLoanScheduleEmail($data['borrower_name'], $data['loan_reference'], $data['schedule'], $to),
+    'payslip' => Email::sendPayslipEmail($data['employee_name'], $data['month'], $data['pdf_base64'], $data['filename'], $to),
 };
 if (!$sent) {
     http_response_code(500);

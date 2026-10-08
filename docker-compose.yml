@@ -2,9 +2,9 @@ services:
   db:
     image: postgres:15
     environment:
-      POSTGRES_DB: loan_system
-      POSTGRES_USER: loanuser
-      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: ${POSTGRES_DB:-loan_system}
+      POSTGRES_USER: ${POSTGRES_USER:-loanuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env — see .env.example}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
@@ -15,24 +15,83 @@ services:
     ports:
       - "5000:5000"
     environment:
-      DATABASE_URL: postgresql://loanuser:changeme@db:5432/loan_system
-      JWT_SECRET_KEY: change-this-secret-in-production
+      # Phase 2 item 2: every secret below is read from .env only — this
+      # file never hardcodes a value again. ${VAR:?message} makes Compose
+      # itself refuse to start the stack if the variable is unset, before
+      # the backend's own startup-safety check (services/startup_safety.py)
+      # would also refuse it.
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      FLASK_DEBUG: ${FLASK_DEBUG:-false}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-loanuser}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-loan_system}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env — see .env.example}
       EMAIL_SERVICE_URL: http://email-service:80/index.php
-      EMAIL_SERVICE_SECRET: change-this-email-secret
-      FRONTEND_URL: http://localhost:3000
+      EMAIL_SERVICE_SECRET: ${EMAIL_SERVICE_SECRET:?Set EMAIL_SERVICE_SECRET in .env — see .env.example}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      # Phase 7 item 1: unset by default (no banner on a real production
+      # stack). Set to e.g. "Test environment" on a staging/test deployment
+      # — every page then shows a visible banner, and it's also what
+      # scripts/reset_dev_data.py requires before it will wipe anything.
+      ENVIRONMENT_LABEL: ${ENVIRONMENT_LABEL:-}
+      USER_DELETION_RETENTION_DAYS: ${USER_DELETION_RETENTION_DAYS:-30}
+      CEO_NAME: ${CEO_NAME:?Set CEO_NAME in .env}
+      CEO_EMAIL: ${CEO_EMAIL:?Set CEO_EMAIL in .env}
+      CEO_PASSWORD: ${CEO_PASSWORD:?Set CEO_PASSWORD in .env}
+      CEO_PHONE: ${CEO_PHONE:-255700000000}
+      UPLOAD_DIR: /app/uploads
+      COMPANY_NAME: ${COMPANY_NAME:-Microfinance LMS}
+      LOGO_URL: ${LOGO_URL:-}
+      VERIFICATION_TOKEN_TTL_HOURS: ${VERIFICATION_TOKEN_TTL_HOURS:-24}
+      PASSWORD_RESET_TTL_MINUTES: ${PASSWORD_RESET_TTL_MINUTES:-60}
+    volumes:
+      # Borrower photos / ID documents — kept outside the image so redeploys don't lose them
+      - uploads:/app/uploads
     depends_on:
-      - db
-      - email-service
+      db:
+        condition: service_started
+      # Waits for email-service to actually be ACCEPTING CONNECTIONS, not
+      # merely for its container to have started (plain `depends_on` only
+      # guarantees start order, not readiness) — this was a real race: the
+      # backend could take its first "create user" request, and therefore
+      # fire its first verification email, before Apache/PHP inside
+      # email-service had finished coming up, so the send failed and (until
+      # services/accounts.py's logging fix) silently vanished (Part 3).
+      email-service:
+        condition: service_healthy
 
   email-service:
     build: ./email-service
     ports:
       - "8080:80"
-    env_file:
-      - ./email-service/.env
+    environment:
+      # Phase 2 items 2 & 11: one root .env feeds the whole stack now — the
+      # committed email-service/.env (which had a live SMTP sandbox
+      # credential in it) is gone; see .env.example.
+      EMAIL_SERVICE_SECRET: ${EMAIL_SERVICE_SECRET:?Set EMAIL_SERVICE_SECRET in .env — see .env.example}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_ENCRYPTION: ${SMTP_ENCRYPTION:-tls}
+      FROM_EMAIL: ${FROM_EMAIL:-}
+      FROM_NAME: ${FROM_NAME:-Microfinance LMS}
+      COMPANY_NAME: ${COMPANY_NAME:-Microfinance LMS}
+    healthcheck:
+      # Any HTTP response (even the 401/400 this endpoint gives without a
+      # valid request) proves Apache+PHP are actually serving requests —
+      # curl only fails here on a real connection failure.
+      test: ["CMD", "curl", "-s", "-o", "/dev/null", "http://localhost:80/index.php"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # The backend's address inside the Docker network — the browser never
+        # sees this; it only calls its own origin's /api/* (see ARCHITECTURE.md §7).
+        BACKEND_INTERNAL_URL: http://backend:5000
     ports:
       - "3000:3000"
     depends_on:
@@ -40,3 +99,4 @@ services:
 
 volumes:
   pgdata:
+  uploads:

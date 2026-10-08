@@ -1,0 +1,13 @@
+# Without this, `COPY . .` (after `npm install` already built a fresh,
+# image-platform node_modules) would layer the HOST's own node_modules on
+# top — wrong platform's native binaries, and a much bigger build context
+# for no reason. Same idea for everything else below: dev-only output
+# that the build step regenerates or never needed in the first place.
+node_modules/
+.output/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+.git

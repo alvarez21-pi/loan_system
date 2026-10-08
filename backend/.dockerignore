@@ -1,0 +1,16 @@
+# Keeps local-only/dev cruft out of every image built from this directory
+# (docker-compose.yml and docker-compose.prod.yml both build ./backend —
+# there's no separate "production" build context, so this is the one
+# place that applies to both). scripts/seed_demo_users.py and the other
+# scripts/ helpers are still copied in (they're runtime-gated, see
+# DEPLOYMENT.md), but none of the following has any reason to ship.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.log
+.git
