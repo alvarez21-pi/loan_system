@@ -225,6 +225,17 @@ export function AppShell({ children }: { children?: ReactNode }) {
   const lastVerified = useRef(0);
   const verifying = useRef(false);
 
+  // The mobile drawer covers the page but doesn't replace it in the DOM
+  // (unlike Modal), so it needs its own scroll lock while open.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [menuOpen]);
+
   const toLogin = useCallback(() => {
     shownUserId.current = null;
     setReady(false);
@@ -341,13 +352,18 @@ export function AppShell({ children }: { children?: ReactNode }) {
           on md+ and never needs one. */}
       {menuOpen ? (
         <div
-          className="fixed inset-0 z-10 bg-black/40 md:hidden"
+          className="fixed inset-0 z-40 bg-black/40 md:hidden"
           onClick={() => setMenuOpen(false)}
           aria-hidden="true"
         />
       ) : null}
+      {/* z-50: above the sticky top bar (z-30) and its backdrop (z-40) — the
+          top bar must never cover the drawer. h-dvh (not inset-y-0) so the
+          drawer tracks the browser's actual visible height as its toolbar
+          shows/hides, with its own bottom padding for that toolbar plus the
+          safe-area inset, so the last menu item is always reachable. */}
       <aside
-        className={`${menuOpen ? "block" : "hidden"} fixed inset-y-0 left-0 z-20 flex w-72 max-w-[85vw] shrink-0 flex-col overflow-y-auto bg-sidebar px-3 py-4 md:static md:block md:h-full md:w-60 md:max-w-none`}
+        className={`${menuOpen ? "block" : "hidden"} fixed left-0 top-0 z-50 flex h-dvh w-72 max-w-[85vw] shrink-0 flex-col overflow-y-auto bg-sidebar px-3 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] md:static md:block md:h-full md:w-60 md:max-w-none md:pb-4`}
       >
         <div className="flex items-center gap-2 px-2 pb-4">
           <SidebarLogo />

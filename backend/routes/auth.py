@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 
@@ -363,6 +363,13 @@ def confirm_password_reset():
     return jsonify({"message": "password has been set"}), 200
 
 
+# "Keep me signed in on this device" — same JWT, just a longer `exp` claim
+# when the box is checked. Unchecked keeps today's behaviour: whatever
+# JWT_ACCESS_TOKEN_EXPIRES is configured (the Flask-JWT-Extended default,
+# 15 minutes, since nothing overrides it elsewhere in this app).
+REMEMBER_ME_EXPIRES = timedelta(days=30)
+
+
 @auth_bp.post("/login")
 def login():
     """Phase 2 item 7: rate-limited per-account (the submitted email) AND
@@ -373,6 +380,7 @@ def login():
     data = request.get_json(silent=True) or {}
     email = _normalize_email(data.get("email"))
     password = data.get("password")
+    remember_me = data.get("remember_me", False)
     identifiers = identifiers_for(email)
     try:
         rate_limit_check("login", identifiers)
@@ -382,6 +390,9 @@ def login():
     if not email or not password:
         rate_limit_failure("login", identifiers)
         return jsonify({"message": "email and password are required"}), 400
+    if not isinstance(remember_me, bool):
+        rate_limit_failure("login", identifiers)
+        return jsonify({"message": "remember_me must be true or false"}), 400
 
     user = User.query.filter_by(email=email, is_active=True).first()
     if user is None or not user.check_password(password):
@@ -397,5 +408,6 @@ def login():
     token = create_access_token(
         identity=str(user.id),
         additional_claims={"role": user.role},
+        expires_delta=REMEMBER_ME_EXPIRES if remember_me else None,
     )
     return jsonify({"access_token": token, "user": user.to_dict()}), 200

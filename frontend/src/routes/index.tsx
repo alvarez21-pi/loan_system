@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { auth, errorMessage, isAuthenticated } from "../lib/api";
-import { Button, Field, Input, InlineNote } from "../components/lms-ui";
+import { Button, Checkbox, Field, Input, InlineNote } from "../components/lms-ui";
 import { COMPANY_NAME, LOGO_URL } from "../branding";
 
 export const Route = createFileRoute("/")({
@@ -27,6 +27,7 @@ function LoginPage() {
   const navigate = useNavigate();
   const [resetMode, setResetMode] = useState(false);
   const [form, setForm] = useState({ email: "", password: "" });
+  const [rememberMe, setRememberMe] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [serverError, setServerError] = useState("");
@@ -73,6 +74,7 @@ function LoginPage() {
     function onPageShow(event: PageTransitionEvent) {
       if (!event.persisted) return;
       setForm({ email: "", password: "" });
+      setRememberMe(false);
       setServerError("");
       if (!new URLSearchParams(window.location.search).get("token") && isAuthenticated()) {
         navigate({ to: "/dashboard", replace: true });
@@ -99,7 +101,7 @@ function LoginPage() {
     if (!validate()) return;
     setBusy(true);
     try {
-      await auth.login({ email: form.email.trim(), password: form.password });
+      await auth.login({ email: form.email.trim(), password: form.password, remember_me: rememberMe });
       navigate({ to: "/dashboard", replace: true });
     } catch (error) {
       setServerError(errorMessage(error));
@@ -314,6 +316,11 @@ function LoginPage() {
               }
             />
           </Field>
+          <Checkbox
+            label="Keep me signed in on this device"
+            checked={rememberMe}
+            onChange={setRememberMe}
+          />
           <Button type="submit" variant="primary" disabled={busy} className="w-full">
             {busy ? "Signing in…" : "Login"}
           </Button>

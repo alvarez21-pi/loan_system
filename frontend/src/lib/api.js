@@ -494,11 +494,11 @@ export const ENDPOINTS = {
 };
 
 export const auth = {
-  async login({ email, password }) {
+  async login({ email, password, remember_me = false }) {
     const payload = await request(ENDPOINTS.login, {
       method: "POST",
       auth: false,
-      body: { email, password },
+      body: { email, password, remember_me },
     });
     const token = payload?.token || payload?.access_token || payload?.data?.token;
     if (!token) throw new ApiError("Login response did not include a token.", 500, payload, false);

@@ -119,6 +119,8 @@ No real value for any of the above belongs in any committed file,
 including this one — the table above says how to generate each secret,
 never what to set it to.
 
+Login sessions last 15 minutes by default; "Keep me signed in on this device" at login extends that to 30 days — same token, nothing to configure here.
+
 ### Health checks
 
 - `GET /api/health` returns `503` if the backend can't reach the
