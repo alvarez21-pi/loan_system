@@ -5,6 +5,7 @@ from functools import wraps
 from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import (
     create_access_token,
+    get_jwt,
     get_jwt_identity,
     jwt_required,
 )
@@ -66,6 +67,16 @@ def auth_required(fn):
         current_user = User.query.get(int(user_id))
         if current_user is None or not current_user.is_active:
             return jsonify({"message": "Your session expired. Please sign in again."}), 401
+        # Security audit finding (High): a token issued before the user's
+        # last password change kept working after that change — the usual
+        # "change your password" incident response did nothing. The "cv"
+        # claim pins a token to the credentials_version it was issued
+        # under; change-password already bumps that counter (line ~103
+        # below), so any OLDER token is now rejected the same way a
+        # deactivated account is. A token from before this fix shipped has
+        # no "cv" claim at all and is treated the same as a mismatch.
+        if get_jwt().get("cv") != current_user.credentials_version:
+            return jsonify({"message": "Your session expired. Please sign in again."}), 401
         if current_user.must_change_password and request.endpoint not in MUST_CHANGE_PASSWORD_ALLOWLIST:
             return jsonify({
                 "message": "You must set a new password before continuing.",
@@ -102,7 +113,19 @@ def change_password(user):
     user.must_change_password = False
     user.credentials_version += 1  # invalidates any outstanding setup/reset link
     db.session.commit()
-    return jsonify({"user": user.to_dict()})
+    # The token just used to authenticate THIS request now carries a stale
+    # "cv" claim (auth_required rejects it on the very next call) — issue a
+    # fresh one so the caller keeps using this same session instead of being
+    # forced to log in again right after successfully changing their own
+    # password. Matches whatever expiry the current token already had.
+    old_claims = get_jwt()
+    was_remembered = (old_claims.get("exp", 0) - old_claims.get("iat", 0)) > 3600
+    new_token = create_access_token(
+        identity=str(user.id),
+        additional_claims={"role": user.role, "cv": user.credentials_version},
+        expires_delta=REMEMBER_ME_EXPIRES if was_remembered else None,
+    )
+    return jsonify({"user": user.to_dict(), "access_token": new_token})
 
 
 @auth_bp.post("/register")
@@ -407,7 +430,7 @@ def login():
     rate_limit_success("login", identifiers)
     token = create_access_token(
         identity=str(user.id),
-        additional_claims={"role": user.role},
+        additional_claims={"role": user.role, "cv": user.credentials_version},
         expires_delta=REMEMBER_ME_EXPIRES if remember_me else None,
     )
     return jsonify({"access_token": token, "user": user.to_dict()}), 200

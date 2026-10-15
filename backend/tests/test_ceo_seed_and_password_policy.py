@@ -153,7 +153,12 @@ def test_change_password_success_clears_the_flag_and_unblocks_other_endpoints(cl
     assert changed.status_code == 200, changed.get_json()
     assert changed.get_json()["user"]["must_change_password"] is False
 
-    now_allowed = client.get("/api/borrowers", headers=headers)
+    # The old token is now stale (Security audit: a token issued before a
+    # password change must not keep working after it) — change-password
+    # returns a fresh one for the caller to keep using.
+    new_token = changed.get_json()["access_token"]
+    assert client.get("/api/borrowers", headers=headers).status_code == 401
+    now_allowed = client.get("/api/borrowers", headers={"Authorization": f"Bearer {new_token}"})
     assert now_allowed.status_code == 200
 
     # The old password no longer works; the new one does.

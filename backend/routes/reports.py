@@ -8,6 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from flask import Blueprint, jsonify, request
+from sqlalchemy.orm import joinedload, selectinload
 
 from models import (
     Borrower,
@@ -73,7 +74,12 @@ def overdue_days(loan, today=None):
 @permission_required("reports:view")
 def portfolio_at_risk(user):
     product_id = request.args.get("product_id", type=int)
-    query = Loan.query.filter(Loan.status.in_(["active", "approved"]))
+    # overdue_days() below reads loan.schedules, and the rows built further
+    # down read loan.borrower.name — both were lazy-loaded once per loan
+    # (N+1) with no eager-load option applied.
+    query = Loan.query.filter(Loan.status.in_(["active", "approved"])).options(
+        joinedload(Loan.borrower), selectinload(Loan.schedules)
+    )
     if product_id:
         query = query.filter(Loan.loan_product_id == product_id)
     loans = query.all()
@@ -164,7 +170,11 @@ def disbursements(user):
     start_date, end_date, label = parse_range()
     product_id = request.args.get("product_id", type=int)
     officer_id = request.args.get("officer_id", type=int)
-    query = Loan.query.filter(Loan.status.in_(["approved", "active", "closed"]), Loan.start_date.between(start_date, end_date))
+    # The rows below read l.borrower.name and l.loan_product.name for every
+    # loan — both were lazy-loaded once per loan (N+1).
+    query = Loan.query.filter(
+        Loan.status.in_(["approved", "active", "closed"]), Loan.start_date.between(start_date, end_date)
+    ).options(joinedload(Loan.borrower), joinedload(Loan.loan_product))
     if product_id: query = query.filter(Loan.loan_product_id == product_id)
     if officer_id: query = query.filter(Loan.created_by == officer_id)
     loans = query.order_by(Loan.start_date).all()
@@ -292,9 +302,22 @@ def cash_flow(user):
 @permission_required("reports:view")
 def loan_officer_performance(user):
     start_date, end_date, label = parse_range()
+    officers = User.query.filter_by(role="maker").all()
+    # Was one Loan query per officer inside the loop below (N+1). One
+    # batched query for every officer's loans in the period, grouped in
+    # Python by created_by instead; schedules eager-loaded too since
+    # overdue_days() reads loan.schedules for each loan.
+    loans_by_officer = defaultdict(list)
+    if officers:
+        officer_ids = [officer.id for officer in officers]
+        officer_loans = Loan.query.filter(
+            Loan.created_by.in_(officer_ids), Loan.start_date.between(start_date, end_date)
+        ).options(selectinload(Loan.schedules)).all()
+        for loan in officer_loans:
+            loans_by_officer[loan.created_by].append(loan)
     rows = []
-    for officer in User.query.filter_by(role="maker").all():
-        loans = Loan.query.filter(Loan.created_by == officer.id, Loan.start_date.between(start_date, end_date)).all()
+    for officer in officers:
+        loans = loans_by_officer.get(officer.id, [])
         good = sum(1 for loan in loans if overdue_days(loan) == 0)
         total_value = sum((Decimal(str(l.principal_amount)) for l in loans), Decimal("0"))
         rows.append([officer.name, str(len(loans)), money_str(total_value), f"{(good / len(loans) * 100) if loans else 0:.1f}%", f"{((len(loans) - good) / len(loans) * 100) if loans else 0:.1f}%"])

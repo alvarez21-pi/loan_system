@@ -37,7 +37,14 @@ export function Card({
   className?: string;
 }) {
   return (
-    <section className={`lms-card ${className}`}>
+    // min-w-0: without it, a grid/flex item defaults to its content's
+    // min-content width — a wide table inside (Payroll batches, Approvals,
+    // etc.) would then blow out the grid and drag the whole PAGE sideways
+    // on a phone, instead of just scrolling inside the table's own
+    // overflow-x-auto wrapper. Harmless at any width where nothing
+    // overflows (desktop), since it only loosens the minimum, never forces
+    // the card smaller than it needs to be.
+    <section className={`lms-card min-w-0 ${className}`}>
       {title ? (
         <header className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
           <div>
@@ -741,7 +748,7 @@ export function DataTable({
   mobileCard?: (row: any) => ReactNode;
 }) {
   const table = (
-    <div className={`overflow-x-auto ${mobileCard ? "hidden sm:block" : ""}`}>
+    <div className={`lms-table-scroll overflow-x-auto ${mobileCard ? "hidden sm:block" : ""}`}>
       <table className="lms-table">
         <thead>
           <tr>

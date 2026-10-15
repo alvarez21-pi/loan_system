@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 
 from flask import Blueprint, current_app, jsonify, request, send_file, send_from_directory
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.exc import StaleDataError
 
 import branding
@@ -1341,8 +1342,9 @@ def create_asset_type(user):
 @operations_bp.get("/assets")
 @auth_required
 def list_assets(_user):
+    # asset.asset_type.name below was lazy-loaded once per row (N+1).
     rows = []
-    for asset in Asset.query.filter_by(is_active=True).all():
+    for asset in Asset.query.filter_by(is_active=True).options(joinedload(Asset.asset_type)).all():
         item = json_row(asset)
         item["asset_type_name"] = asset.asset_type.name if asset.asset_type else asset.type
         rows.append(item)
@@ -1364,7 +1366,8 @@ def create_asset(user):
     except (KeyError, TypeError, ValueError) as exc:
         return error(str(exc))
     db.session.add(asset)
-    audit(user, "CREATE", "assets", None)
+    db.session.commit()  # commit first so asset.id exists for the audit row below
+    audit(user, "CREATE", "assets", asset.id)
     db.session.commit()
     return jsonify({"asset": json_row(asset)}), 201
 
@@ -1603,7 +1606,8 @@ def create_withdrawal(user):
 @operations_bp.get("/leave-requests")
 @auth_required
 def list_leave_requests(user):
-    query = LeaveRequest.query
+    # row.employee.name below was lazy-loaded once per row (N+1).
+    query = LeaveRequest.query.options(joinedload(LeaveRequest.employee))
     if request.args.get("employee_id"): query = query.filter_by(employee_id=request.args["employee_id"])
     if request.args.get("status"): query = query.filter_by(status=request.args["status"])
     rows = [

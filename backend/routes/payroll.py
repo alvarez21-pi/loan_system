@@ -11,6 +11,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from flask import Blueprint, jsonify, request, send_file
+from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
 from extensions import db
@@ -139,7 +140,12 @@ def employee_deduction_json(row):
 @payroll_bp.get("/employee-deductions")
 @permission_required("payroll:manage")
 def list_employee_deductions(user):
-    query = EmployeeDeduction.query
+    # employee_deduction_json() below reads row.employee.name and
+    # row.deduction_type.name for every row — both were lazy-loaded once
+    # per row (N+1).
+    query = EmployeeDeduction.query.options(
+        joinedload(EmployeeDeduction.employee), joinedload(EmployeeDeduction.deduction_type)
+    )
     employee_id = request.args.get("employee_id", type=int)
     if employee_id:
         query = query.filter_by(employee_id=employee_id)
@@ -344,7 +350,13 @@ def batch_json(batch):
 @payroll_bp.get("")
 @permission_required("payroll:manage")
 def list_batches(user):
-    batches = PayrollBatch.query.order_by(PayrollBatch.id.desc()).all()
+    # batch_json()/line_json() below read line.employee and
+    # line.deduction_lines for every line of every batch — both were
+    # lazy-loaded one query at a time per line (N+1).
+    batches = PayrollBatch.query.options(
+        selectinload(PayrollBatch.lines).joinedload(PayrollRun.employee),
+        selectinload(PayrollBatch.lines).selectinload(PayrollRun.deduction_lines),
+    ).order_by(PayrollBatch.id.desc()).all()
     return jsonify({"payroll": [batch_json(batch) for batch in batches]})
 
 

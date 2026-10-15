@@ -233,6 +233,20 @@
     color: var(--color-destructive-foreground);
   }
 
+  /* A wide table (Payroll batches, Approvals, etc.) scrolls inside this
+     wrapper only — overscroll-behavior-x stops that scroll from chaining
+     to the page once it hits the end, and the inset shadow is a visible,
+     always-on hint (no JS) that there's more to see sideways, on phones
+     where a table is actually likely to be wider than the screen. */
+  .lms-table-scroll {
+    overscroll-behavior-x: contain;
+  }
+  @media (max-width: 767px) {
+    .lms-table-scroll {
+      box-shadow: inset -8px 0 6px -6px rgba(0, 0, 0, 0.15);
+    }
+  }
+
   .lms-table {
     width: 100%;
     border-collapse: collapse;

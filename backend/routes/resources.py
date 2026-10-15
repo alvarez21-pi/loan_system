@@ -2,7 +2,10 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from flask import Blueprint, jsonify, request
+from sqlalchemy import func
+from sqlalchemy.orm import contains_eager, joinedload, selectinload
 
+from extensions import db
 from models import (
     AuditLog,
     Borrower,
@@ -83,7 +86,17 @@ def loan_summary(loan, viewer):
 @resources_bp.get("/loans")
 @auth_required
 def list_loans(current_user):
-    query = Loan.query.join(Borrower)
+    # loan_summary() below reads loan.borrower, loan.loan_product and (via
+    # settlement_amount) loan.schedules for every row — previously
+    # lazy-loaded one query at a time per loan (N+1). Borrower is already
+    # joined for filtering/search, so contains_eager reuses that same join
+    # instead of issuing a second one; loan_product/schedules get their own
+    # single batched query each via joinedload/selectinload.
+    query = Loan.query.join(Borrower).options(
+        contains_eager(Loan.borrower),
+        joinedload(Loan.loan_product),
+        selectinload(Loan.schedules),
+    )
     status_filter = request.args.get("status")
     if status_filter:
         query = query.filter(Loan.status == status_filter)
@@ -140,7 +153,12 @@ def get_loan(current_user, loan_id):
 @resources_bp.get("/repayments")
 @auth_required
 def list_repayments(_current_user):
-    query = Repayment.query.join(Loan).join(Borrower)
+    # repayment.loan.borrower.name below was lazy-loaded per row (N+1);
+    # Loan and Borrower are already joined for filtering/search, so reuse
+    # those same joins to eager-load both in one go.
+    query = Repayment.query.join(Loan).join(Borrower).options(
+        contains_eager(Repayment.loan).contains_eager(Loan.borrower)
+    )
     results, pagination = paginate(
         query,
         request.args,
@@ -180,7 +198,9 @@ def list_expenses(current_user):
 @resources_bp.get("/penalties")
 @auth_required
 def list_penalties(current_user):
-    query = Penalty.query
+    # penalty.loan.borrower.name below was lazy-loaded per row (N+1): no
+    # join exists here to reuse, so eager-load both hops explicitly.
+    query = Penalty.query.options(joinedload(Penalty.loan).joinedload(Loan.borrower))
     if request.args.get("status"):
         query = query.filter_by(status=request.args["status"])
     if request.args.get("loan_id"):
@@ -251,8 +271,11 @@ def dashboard_summary(_current_user):
                 "borrowers": Borrower.query.count(),
                 "loans": Loan.query.count(),
                 "active_loans": Loan.query.filter_by(status="active").count(),
+                # Was Loan.query.all() + summing in Python — loaded every
+                # column of every loan row just to add up one column.
+                # Same scope (no status filter) as before, computed in SQL.
                 "outstanding_balance": float(
-                    sum((loan.outstanding_balance or 0) for loan in Loan.query.all())
+                    db.session.query(func.coalesce(func.sum(Loan.outstanding_balance), 0)).scalar()
                 ),
             }
         }

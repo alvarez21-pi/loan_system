@@ -50,7 +50,13 @@ def create_app():
     email_secret = os.getenv("EMAIL_SERVICE_SECRET", "change-this-email-secret")
     validate_secret("EMAIL_SERVICE_SECRET", email_secret, environment)
 
-    app.config["FRONTEND_URL"] = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    # FRONTEND_URL may be a comma-separated list (e.g. staging + production
+    # sharing one backend) — every entry is an allowed CORS origin below,
+    # but links built from app.config["FRONTEND_URL"] (password-reset/setup
+    # emails, services/accounts.py) need exactly one URL, so that config
+    # value stays the first entry regardless of how many are configured.
+    frontend_origins = [o.strip() for o in os.getenv("FRONTEND_URL", "http://localhost:3000").split(",") if o.strip()]
+    app.config["FRONTEND_URL"] = frontend_origins[0] if frontend_origins else "http://localhost:3000"
     # Phase 7 item 1: unset (the default) means no banner anywhere. Never a
     # secret, so it's fine to expose as-is on the public endpoint below.
     app.config["ENVIRONMENT_LABEL"] = os.getenv("ENVIRONMENT_LABEL", "").strip()
@@ -66,7 +72,12 @@ def create_app():
     # CORS is only needed when the frontend calls the API cross-origin (local
     # dev without the Nginx proxy). In Docker the frontend proxies /api to the
     # backend itself, so the browser only ever talks to its own origin.
-    CORS(app)
+    # Security audit: was CORS(app) with no origins= — Flask-CORS defaults
+    # to "*" (any origin reflected back), wide open. Restricted to exactly
+    # the configured frontend_origins list; supports_credentials is left at
+    # its default (False) — this app sends the session as a Bearer token,
+    # never a cookie, so that flag was never doing anything either way.
+    CORS(app, origins=frontend_origins)
     db.init_app(app)
     migrate.init_app(app, db)
     jwt.init_app(app)

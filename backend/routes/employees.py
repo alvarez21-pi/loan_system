@@ -2,6 +2,7 @@ from datetime import date
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import joinedload
 
 from extensions import db
 from models import Employee, User
@@ -67,7 +68,9 @@ def duplicate_warning(name, phone, exclude_id=None):
 @employees_bp.get("")
 @auth_required
 def list_employees(user):
-    query = Employee.query.order_by(Employee.name)
+    # employee_json() below reads employee.user for every row — lazy-loaded
+    # once per row (N+1).
+    query = Employee.query.options(joinedload(Employee.user)).order_by(Employee.name)
     if not has_permission(user, "employees:manage"):
         # Everyone else only ever needs their own record (e.g. to file leave).
         query = query.filter_by(user_id=user.id)

@@ -531,8 +531,18 @@ export const auth = {
   // The only way out of must_change_password=true (AppShell's gate) — also
   // usable any time by an already-signed-in user to change their password
   // voluntarily, mirroring the backend's one `/api/auth/change-password`.
-  changePassword: (current_password, new_password) =>
-    request("/api/auth/change-password", { method: "POST", body: { current_password, new_password } }),
+  // Changing the password bumps credentials_version server-side, which
+  // invalidates the token this very request was authenticated with — the
+  // response carries a fresh one, which must replace it or the next
+  // request would be logged out right after a successful change.
+  async changePassword(current_password, new_password) {
+    const payload = await request("/api/auth/change-password", {
+      method: "POST",
+      body: { current_password, new_password },
+    });
+    if (payload?.access_token) setSession(payload.access_token, payload.user || getUser());
+    return payload;
+  },
   me: verifySession,
   logout() {
     clearSession();

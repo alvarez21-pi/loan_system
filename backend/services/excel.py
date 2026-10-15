@@ -17,6 +17,23 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 MONEY_FORMAT = "#,##0.00"
 
 
+# OWASP CSV/Excel formula-injection mitigation: a string cell whose first
+# character would make a spreadsheet app treat it as a live formula (=, +,
+# -, @, or a leading tab/CR) is prefixed with a single quote, so openpyxl
+# stores it as plain text instead of writing it out as an actual <f> formula
+# that Excel/Sheets/LibreOffice would execute on open. Only applied to row
+# DATA (user-controlled — borrower names, notes, etc.), never to the
+# app's own totals-row SUM() formula below, which is set directly on the
+# cell rather than through this path.
+FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _escape_formula(value):
+    if isinstance(value, str) and value and value[0] in FORMULA_TRIGGER_CHARS:
+        return "'" + value
+    return value
+
+
 def primary_hex():
     return branding.PRIMARY_COLOR.lstrip("#")
 
@@ -77,7 +94,7 @@ def excel_report(title, period, generated_by, kpis, columns, rows, numeric_cols=
         cell.alignment = Alignment(horizontal="center")
 
     for row in rows:
-        sheet.append(row)
+        sheet.append([_escape_formula(v) for v in row])
 
     data_row_count = len(rows)
     for r in range(2, 2 + data_row_count):

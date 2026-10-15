@@ -176,28 +176,57 @@ branch). Two things to know before you do:
 
 ### Restoring a backup
 
-```sh
-# Exec into the running backend container:
-docker compose -f docker-compose.prod.yml exec backend \
-  python scripts/restore_backup.py /path/to/backup-20261014-020000.lmsbackup --yes
-```
+**There is no restore button anywhere in the app.** The Backup page only
+*downloads* a backup; restoring is a deliberately manual command run on
+the server, exec'd into the running backend container — never something
+a browser click can trigger.
 
-- You'll be prompted for the backup's password (or set `BACKUP_PASSWORD`
-  in the shell you're running this from, never as a command-line
-  argument — that would leak into shell history).
-- This **overwrites** the current database and, if the backup has one,
-  **replaces** the entire uploads directory. `--yes` is required — there
-  is no default.
-- A wrong password fails immediately with a clear error (AES-GCM's
-  authentication tag won't verify) — it never silently restores garbage.
-- To restore the *nightly* (unencrypted) backups instead, the same
-  `restore_backup.py` script doesn't apply directly — they're plain zips,
-  not `.lmsbackup` files. Unzip one manually and apply `database.sql`
-  with `psql $DATABASE_URL -f database.sql`, then copy its `uploads/`
-  over the uploads volume by hand; this is the documented disaster path
-  for that copy, deliberately a manual, careful procedure rather than a
-  one-command script, since it's the backup you'd reach for when
-  something has already gone wrong with the encrypted one.
+**⚠️ This WIPES the database — it does not merge.** Restoring drops
+every existing table and recreates it from the backup (the dump is taken
+with `pg_dump --clean --if-exists`, so the restore script's `psql -f
+dump.sql` starts each table with `DROP TABLE IF EXISTS` before
+recreating it). Anything written to the database *after* the backup was
+taken — any loan, repayment, borrower, user, payroll run — is gone,
+permanently, the moment this command succeeds. Uploaded files behave the
+same way: the whole uploads directory is deleted and replaced with the
+backup's copy (`shutil.rmtree` then `shutil.copytree` in
+`services/backup.py`'s `restore_uploads`). There is no partial or
+selective restore, and no undo.
+
+Step by step, exactly as it works:
+
+1. Get the backup file and its password onto/known to the server (the
+   `.lmsbackup` file downloaded from the Backup page, and the password
+   that was typed in at download time — never stored anywhere, so if
+   it's lost the file is unrecoverable, full stop).
+2. Exec into the backend container and run:
+   ```sh
+   docker compose -f docker-compose.prod.yml exec backend \
+     python scripts/restore_backup.py /path/to/backup-20261014-020000.lmsbackup --yes
+   ```
+   `--yes` is required — there is no default, specifically so this can't
+   be run by muscle-memory/autocomplete without meaning it.
+3. It asks for the backup's password (`Backup password:` prompt), unless
+   `BACKUP_PASSWORD` is already set in the shell's environment — never
+   pass it as a command-line argument, that leaks into shell history and
+   `ps`.
+4. It prints its progress as it goes: `Decrypting...` → `Extracting...`
+   → `Restoring the database — this OVERWRITES the current one...` →
+   `Database restored.` → (if the backup has uploads)
+   `Restoring uploads — this REPLACES the current uploads directory...`
+   → `Uploads restored.` → `Restore complete.`
+5. A wrong password fails immediately and cleanly at the decrypt step
+   (AES-GCM's authentication tag won't verify) — before anything in the
+   database is touched. It never silently restores garbage.
+
+To restore the *nightly* (unencrypted) backups instead, the same
+`restore_backup.py` script doesn't apply directly — they're plain zips,
+not `.lmsbackup` files. Unzip one manually and apply `database.sql`
+with `psql $DATABASE_URL -f database.sql`, then copy its `uploads/`
+over the uploads volume by hand; this is the documented disaster path
+for that copy, deliberately a manual, careful procedure rather than a
+one-command script, since it's the backup you'd reach for when
+something has already gone wrong with the encrypted one.
 
 ### Testing a restore (do this periodically, not just when you need it)
 
@@ -219,9 +248,38 @@ cadence (e.g. whenever you rotate the CEO's backup password, or monthly)
 — a printed row count on every table you expect data in is the proof the
 backup actually works, not just that the download succeeded.
 
+Worked example, run live against this deployment to confirm all of the
+above (not hypothetical):
+
+```sh
+$ docker compose exec backend python scripts/test_restore_backup.py /tmp/test_backup.lmsbackup
+Decrypting...
+Creating throwaway database 'lms_restore_test_7d8096d8' (the real database is never touched)...
+Extracting...
+Restoring into 'lms_restore_test_7d8096d8'...
+Restore complete. Row counts:
+
+  borrowers                      3
+  employees                     10
+  loans                           4
+  payroll_runs                   69
+  repayments                      4
+  users                           10
+  ... (every table in the schema, truncated here)
+
+Dropping throwaway database 'lms_restore_test_7d8096d8'...
+Done. The real database was never opened for writing.
+```
+
+This confirms the file downloaded from the Backup page decrypts with the
+password it was given, and that its contents are a complete, correct
+copy of the real data — without ever touching the real database to
+prove it.
+
 This exact procedure (decrypt → extract → restore into a fresh,
-empty Postgres 15 database → verify the data round-tripped correctly)
-was run once already while building this feature, against a throwaway
-Postgres 15 container, confirming the backup/restore scripts genuinely
-work end-to-end — that test found and fixed a `pg_dump`/server version
-mismatch.
+empty Postgres database → verify the data round-tripped correctly) has
+now been run twice: once while building this feature (against a
+throwaway Postgres 15 container, which found and fixed a `pg_dump`/
+server version mismatch), and again just now against this deployment's
+own real downloaded backup, confirming the backup/restore scripts
+genuinely work end-to-end.
