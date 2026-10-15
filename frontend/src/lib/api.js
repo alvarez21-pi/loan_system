@@ -11,15 +11,23 @@
  *   VITE_API_BASE_URL only for the unusual case of a frontend dev server
  *   that is NOT proxying to a backend of its own (e.g. pointing `vite dev`
  *   at a separately-running backend on another port).
- * - Attaches the JWT from sessionStorage as an Authorization Bearer token.
- *   sessionStorage (NOT localStorage) is deliberate: it is per-tab, never
- *   shared across tabs or windows of the same origin. localStorage IS shared
- *   across every tab, which was the root cause of a real bug — logging into
- *   a different account in one tab silently changed what another open tab
- *   showed, and a token-only page (verification/reset) could render based on
- *   whichever session happened to be sitting in shared storage instead of
- *   the token actually in its own URL. Never switch this back without
- *   re-solving that (see the cross-tab-isolation test in the frontend suite).
+ * - Attaches the JWT as an Authorization Bearer token, read from whichever
+ *   of sessionStorage/localStorage currently holds it (see "remember me"
+ *   below). sessionStorage is per-tab, never shared across tabs or windows
+ *   of the same origin; localStorage IS shared across every tab AND
+ *   survives closing the browser entirely. Plain (non-remembered) logins
+ *   use sessionStorage ONLY, on purpose — localStorage for everything was
+ *   the root cause of a real bug: logging into a different account in one
+ *   tab silently changed what another open tab showed. Never switch a
+ *   non-remembered login back to localStorage without re-solving that.
+ * - "Keep me signed in on this device" (login's remember_me) is the one
+ *   deliberate exception: that session is written to localStorage instead,
+ *   because the whole point is to survive the browser itself closing —
+ *   sessionStorage cannot do that, by spec, regardless of the token's own
+ *   expiry. getToken()/getUser() check sessionStorage first (so a
+ *   non-remembered login in this tab always wins), falling back to
+ *   localStorage (where a remembered session lives, reachable from any
+ *   tab/after any restart, same as a browser's real "stay signed in" does).
  * - On 401 (invalid/expired token) it clears the session and redirects to login
  * - On 403 (valid session, wrong role) it never touches the session — callers
  *   show an in-place "You don't have permission to do this." message instead
@@ -37,7 +45,7 @@ export const LOGIN_PATH = "/";
 export function getToken() {
   if (typeof window === "undefined") return null;
   try {
-    return window.sessionStorage.getItem(TOKEN_KEY);
+    return window.sessionStorage.getItem(TOKEN_KEY) || window.localStorage.getItem(TOKEN_KEY);
   } catch {
     return null;
   }
@@ -46,23 +54,37 @@ export function getToken() {
 export function getUser() {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.sessionStorage.getItem(USER_KEY);
+    const raw = window.sessionStorage.getItem(USER_KEY) || window.localStorage.getItem(USER_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 
-export function setSession(token, user) {
+/**
+ * `remember`: true persists to localStorage (survives closing the browser),
+ * false uses sessionStorage (cleared with the tab/browser, never shared
+ * across tabs). Omitted (e.g. re-caching the same session after /me or a
+ * token refresh from change-password) keeps whichever one is already
+ * active, so those callers never have to know or guess which it was.
+ */
+export function setSession(token, user, remember) {
   if (typeof window === "undefined") return;
-  window.sessionStorage.setItem(TOKEN_KEY, token || "");
-  if (user) window.sessionStorage.setItem(USER_KEY, JSON.stringify(user));
+  const persist = remember === undefined ? window.localStorage.getItem(TOKEN_KEY) !== null : remember;
+  const store = persist ? window.localStorage : window.sessionStorage;
+  const other = persist ? window.sessionStorage : window.localStorage;
+  store.setItem(TOKEN_KEY, token || "");
+  if (user) store.setItem(USER_KEY, JSON.stringify(user));
+  other.removeItem(TOKEN_KEY);
+  other.removeItem(USER_KEY);
 }
 
 export function clearSession() {
   if (typeof window === "undefined") return;
   window.sessionStorage.removeItem(TOKEN_KEY);
   window.sessionStorage.removeItem(USER_KEY);
+  window.localStorage.removeItem(TOKEN_KEY);
+  window.localStorage.removeItem(USER_KEY);
 }
 
 export function isAuthenticated() {
@@ -502,7 +524,7 @@ export const auth = {
     });
     const token = payload?.token || payload?.access_token || payload?.data?.token;
     if (!token) throw new ApiError("Login response did not include a token.", 500, payload, false);
-    setSession(token, payload?.user || payload?.data?.user || null);
+    setSession(token, payload?.user || payload?.data?.user || null, Boolean(remember_me));
     return { token, user: getUser() };
   },
   register: (data) => request("/api/auth/register", { method: "POST", body: data }),

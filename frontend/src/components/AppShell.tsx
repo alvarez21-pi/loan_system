@@ -207,10 +207,12 @@ function MustChangePasswordGate({
  *  - Coming back to a tab left open a while (`visibilitychange`) triggers
  *    the same re-verification, in case the token expired server-side while
  *    the tab was in the background.
- * The session itself lives in sessionStorage, not localStorage — each tab is
- * independent, so a login/logout in ANOTHER tab never touches this one; there
- * is deliberately no cross-tab `storage`-event listener here any more (it
- * would do nothing, since sessionStorage never fires that event across tabs).
+ * A plain (non-remembered) session lives in sessionStorage — each tab is
+ * independent, so a login/logout in ANOTHER tab never touches this one. A
+ * "keep me signed in" session lives in localStorage instead (lib/api.js),
+ * specifically so it survives closing the browser; a change to it from
+ * another tab isn't picked up instantly here (no cross-tab `storage`-event
+ * listener), only on this tab's own next verify (navigation/focus/pageshow).
  * None of this depends on the environment: it is plain browser events plus
  * the API, so it behaves the same in production as on localhost.
  */
