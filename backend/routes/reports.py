@@ -4,8 +4,8 @@ the money-sensitive ones (income statement, cash flow, expenses by category)
 additionally need reports:financial.
 """
 from collections import defaultdict
-from datetime import date, datetime
-from decimal import Decimal
+from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy.orm import joinedload, selectinload
@@ -22,7 +22,7 @@ from models import (
     Repayment,
     User,
 )
-from routes.operations import permission_required
+from routes.operations import cash_on_hand_as_of, permission_required
 from services.excel import excel_report
 from services.loan_calculator import local_today, money
 from services.pdf import report_pdf
@@ -43,15 +43,15 @@ def money_str(value):
     return f"{Decimal(str(value or 0)):,.2f}"
 
 
-def export(title, period, user, kpis, columns, rows, numeric_cols, totals_row=None, landscape=False):
+def export(title, period, user, kpis, columns, rows, numeric_cols, totals_row=None, landscape=False, section_rows=None, subtotal_rows=None):
     fmt = request.args.get("format")
     if fmt not in ("pdf", "excel"):
         return None
     if fmt == "pdf":
-        stream = report_pdf(title, period, user.name, kpis, columns, rows, totals_row, landscape, numeric_cols)
+        stream = report_pdf(title, period, user.name, kpis, columns, rows, totals_row, landscape, numeric_cols, section_rows, subtotal_rows)
         from flask import send_file
         return send_file(stream, as_attachment=True, download_name=f"{title.lower().replace(' ', '-')}.pdf", mimetype="application/pdf")
-    stream = excel_report(title, period, user.name, kpis, columns, rows, numeric_cols, totals_row)
+    stream = excel_report(title, period, user.name, kpis, columns, rows, numeric_cols, totals_row, section_rows, subtotal_rows)
     from flask import send_file
     return send_file(stream, as_attachment=True, download_name=f"{title.lower().replace(' ', '-')}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -204,18 +204,26 @@ def income_statement(user):
     total_income = interest_income + penalty_income
     total_outgoings = expenses_total + payroll_total
     net = total_income - total_outgoings
-    rows = [
-        ["Interest income", money_str(interest_income)],
-        ["Penalty income", money_str(penalty_income)],
-        ["Total income", money_str(total_income)],
-        ["Expenses", money_str(-expenses_total)],
-        ["Payroll", money_str(-payroll_total)],
-        ["Total outgoings", money_str(-total_outgoings)],
-        ["Net income", money_str(net)],
-    ]
+
+    # Presentation only, same figures as before — labeled sections with a
+    # subtotal each, same treatment as the Cash Flow statement.
+    rows, section_rows, subtotal_rows = [], [], []
+    section_rows.append(len(rows)); rows.append(["Income", ""])
+    rows.append(["Interest income", money_str(interest_income)])
+    rows.append(["Penalty income", money_str(penalty_income)])
+    subtotal_rows.append(len(rows)); rows.append(["Total Income", money_str(total_income)])
+    section_rows.append(len(rows)); rows.append(["Expenses", ""])
+    rows.append(["Expenses", money_str(-expenses_total)])
+    rows.append(["Payroll", money_str(-payroll_total)])
+    subtotal_rows.append(len(rows)); rows.append(["Total Expenses", money_str(-total_outgoings)])
+    section_rows.append(len(rows)); rows.append(["Net Income", money_str(net)])
+
     kpis = [("Total income", money_str(total_income)), ("Total outgoings", money_str(total_outgoings)), ("Net income", money_str(net))]
     columns = ["Line", "Amount"]
-    exported = export("Income Statement", label, user, kpis, columns, rows, numeric_cols=[1])
+    exported = export(
+        "Income Statement", label, user, kpis, columns, rows, numeric_cols=[1],
+        section_rows=section_rows, subtotal_rows=subtotal_rows,
+    )
     if exported:
         return exported
     return jsonify({"interest_income": float(interest_income), "penalty_income": float(penalty_income), "expenses": float(expenses_total), "payroll": float(payroll_total), "net_income": float(net)})
@@ -276,26 +284,89 @@ def borrower_statement(user, borrower_id):
 @reports_bp.get("/cash-flow")
 @permission_required("reports:financial")
 def cash_flow(user):
+    """A proper Statement of Cash Flows: Operating Activities (repayments
+    in; disbursements, expenses and payroll out) and Financing Activities
+    (capital injections in, owner withdrawals out — CapitalEntry, the
+    existing mechanism for both; no new table), each subtotaled, rolling
+    up to Opening Balance + Net Change = Closing Balance. Opening/Closing
+    use cash_on_hand_as_of() (routes/operations.py) — the exact same
+    formula the Capital page's own live figure uses, evaluated at the
+    start and end of this period, so this statement always reconciles
+    with it instead of drifting via a second implementation."""
     start_date, end_date, label = parse_range()
-    rows = []
+
+    operating = []
     for repayment in Repayment.query.filter(Repayment.payment_date.between(start_date, end_date)).all():
-        rows.append((repayment.payment_date, "Repayment received", float(repayment.amount_paid), 0))
+        operating.append((repayment.payment_date, "Repayment received", Decimal(str(repayment.amount_paid))))
     for loan in Loan.query.filter(Loan.start_date.between(start_date, end_date), Loan.status.in_(["approved", "active", "closed"])).all():
-        rows.append((loan.start_date, f"Loan #{loan.id} disbursed", 0, float(loan.principal_amount)))
+        operating.append((loan.start_date, f"Loan #{loan.id} disbursed", -Decimal(str(loan.principal_amount))))
     for expense in Expense.query.filter(Expense.date.between(start_date, end_date)).all():
-        rows.append((expense.date, f"Expense: {expense.category}", 0, float(expense.amount)))
+        operating.append((expense.date, f"Expense: {expense.category}", -Decimal(str(expense.amount))))
+    for batch in PayrollBatch.query.filter_by(status="paid").all():
+        if batch.finalized_at and start_date <= batch.finalized_at.date() <= end_date:
+            paid = sum((Decimal(str(line.net_pay)) for line in batch.lines), Decimal("0"))
+            if paid:
+                operating.append((batch.finalized_at.date(), f"Payroll paid — {batch.month}", -paid))
+    operating.sort(key=lambda r: r[0])
+
+    financing = []
     for entry in CapitalEntry.query.filter(CapitalEntry.entry_type.in_(["injection", "withdrawal"]), CapitalEntry.date.between(start_date, end_date)).all():
-        if entry.entry_type == "injection": rows.append((entry.date, "Capital injection", float(entry.amount), 0))
-        else: rows.append((entry.date, "Capital withdrawal", 0, float(entry.amount)))
-    rows.sort(key=lambda r: r[0])
-    total_in = sum(r[2] for r in rows); total_out = sum(r[3] for r in rows)
-    table_rows = [[r[0].isoformat(), r[1], money_str(r[2]), money_str(r[3])] for r in rows]
-    kpis = [("Cash in", money_str(total_in)), ("Cash out", money_str(total_out)), ("Net", money_str(total_in - total_out))]
-    columns = ["Date", "Description", "Cash in", "Cash out"]
-    exported = export("Cash Flow", label, user, kpis, columns, table_rows, numeric_cols=[2, 3], totals_row=["", "Total", money_str(total_in), money_str(total_out)])
+        amount = Decimal(str(entry.amount))
+        label_text = "Capital injection" if entry.entry_type == "injection" else "Capital withdrawal"
+        financing.append((entry.date, label_text, amount if entry.entry_type == "injection" else -amount))
+    financing.sort(key=lambda r: r[0])
+
+    operating_net = sum((r[2] for r in operating), Decimal("0"))
+    financing_net = sum((r[2] for r in financing), Decimal("0"))
+    net_change = operating_net + financing_net
+    opening_balance = cash_on_hand_as_of(start_date - timedelta(days=1))["cash_on_hand"]
+    # Whole-shilling HALF_UP, but NOT clamped to non-negative like money()
+    # (services/loan_calculator.py) — a cash balance can genuinely go
+    # negative, and this statement's whole point is to show that, not hide it.
+    closing_balance = (opening_balance + net_change).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+
+    # Built incrementally, recording each styled row's index as it's
+    # appended — safer than computing positions by formula afterward.
+    rows = []
+    section_rows = []
+    subtotal_rows = []
+
+    section_rows.append(len(rows)); rows.append(["", "Operating Activities", ""])
+    rows += [[d.isoformat(), desc, money_str(amt)] for d, desc, amt in operating]
+    subtotal_rows.append(len(rows)); rows.append(["", "Total Operating Activities", money_str(operating_net)])
+
+    section_rows.append(len(rows)); rows.append(["", "Financing Activities", ""])
+    rows += [[d.isoformat(), desc, money_str(amt)] for d, desc, amt in financing]
+    subtotal_rows.append(len(rows)); rows.append(["", "Total Financing Activities", money_str(financing_net)])
+
+    subtotal_rows.append(len(rows)); rows.append(["", "Net Increase/(Decrease) in Cash", money_str(net_change)])
+    subtotal_rows.append(len(rows)); rows.append(["", "Opening Balance", money_str(opening_balance)])
+    section_rows.append(len(rows)); rows.append(["", "Closing Balance", money_str(closing_balance)])
+
+    kpis = [
+        ("Operating Activities", money_str(operating_net)),
+        ("Financing Activities", money_str(financing_net)),
+        ("Net Change", money_str(net_change)),
+        ("Closing Balance", money_str(closing_balance)),
+    ]
+    columns = ["Date", "Description", "Amount"]
+    exported = export(
+        "Cash Flow", label, user, kpis, columns, rows, numeric_cols=[2],
+        section_rows=section_rows, subtotal_rows=subtotal_rows,
+    )
     if exported:
         return exported
-    return jsonify({"flow": [{"date": r[0].isoformat(), "description": r[1], "cash_in": r[2], "cash_out": r[3]} for r in rows], "total_in": total_in, "total_out": total_out})
+    return jsonify({
+        "flow": (
+            [{"date": d.isoformat(), "description": desc, "amount": float(amt), "section": "Operating"} for d, desc, amt in operating]
+            + [{"date": d.isoformat(), "description": desc, "amount": float(amt), "section": "Financing"} for d, desc, amt in financing]
+        ),
+        "operating_activities_net": float(operating_net),
+        "financing_activities_net": float(financing_net),
+        "net_change_in_cash": float(net_change),
+        "opening_balance": float(opening_balance),
+        "closing_balance": float(closing_balance),
+    })
 
 
 @reports_bp.get("/loan-officer-performance")

@@ -1,7 +1,7 @@
 import os
 import uuid
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from flask import Blueprint, current_app, jsonify, request, send_file, send_from_directory
 from sqlalchemy.exc import IntegrityError
@@ -1410,27 +1410,83 @@ def _sum(query_scalar):
     return Decimal(str(query_scalar or 0))
 
 
+def _round_balance(value):
+    """Whole-shilling HALF_UP rounding WITHOUT clamping to non-negative.
+    Unlike services.loan_calculator.money() (used everywhere else in this
+    app for amounts that are never legitimately negative — a deduction, a
+    repayment), a cash BALANCE can genuinely go negative, and silently
+    clamping it to 0 would hide a real shortfall instead of reporting it."""
+    return Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+
+
+def cash_on_hand_as_of(cutoff_date=None):
+    """Every component of cash on hand, as it stood at the end of
+    cutoff_date — None means no cutoff at all (every entry to date, i.e.
+    "right now"). Factored out of capital_breakdown() below so a report
+    can also ask "what was cash on hand at the START of this period" with
+    the exact same formula, instead of a second hand-written copy that
+    could drift out of sync with it. An opening-capital correction with no
+    date of its own (that field is optional, Part 4.2) is treated as
+    having happened at inception, since that's its role regardless of
+    when it was entered.
+    """
+    from sqlalchemy import func
+
+    def upto(query, column):
+        return query.filter(column <= cutoff_date) if cutoff_date is not None else query
+
+    opening_q = CapitalEntry.query.filter_by(entry_type="opening")
+    if cutoff_date is not None:
+        opening_q = opening_q.filter(db.or_(CapitalEntry.date.is_(None), CapitalEntry.date <= cutoff_date))
+    opening_row = opening_q.order_by(CapitalEntry.created_at.desc()).first()
+    opening = opening_row.new_value if opening_row else Decimal("0")
+    injections = _sum(upto(
+        db.session.query(func.coalesce(func.sum(CapitalEntry.amount), 0)).filter_by(entry_type="injection"),
+        CapitalEntry.date,
+    ).scalar())
+    withdrawals = _sum(upto(
+        db.session.query(func.coalesce(func.sum(CapitalEntry.amount), 0)).filter_by(entry_type="withdrawal"),
+        CapitalEntry.date,
+    ).scalar())
+    repayments_received = _sum(upto(
+        db.session.query(func.coalesce(func.sum(Repayment.amount_paid), 0)), Repayment.payment_date,
+    ).scalar())
+    principal_disbursed = _sum(
+        upto(
+            db.session.query(func.coalesce(func.sum(Loan.principal_amount), 0))
+            .filter(Loan.status.in_(["active", "closed"])),
+            Loan.start_date,
+        ).scalar()
+    )
+    expenses_total = _sum(upto(db.session.query(func.coalesce(func.sum(Expense.amount), 0)), Expense.date).scalar())
+    from models import PayrollBatch
+    payroll_paid = sum(
+        (
+            Decimal(str(line.net_pay))
+            for batch in PayrollBatch.query.filter_by(status="paid").all()
+            if cutoff_date is None or (batch.finalized_at and batch.finalized_at.date() <= cutoff_date)
+            for line in batch.lines
+        ),
+        Decimal("0"),
+    )
+    cash_on_hand = _round_balance(opening + injections - withdrawals + repayments_received - principal_disbursed - expenses_total - payroll_paid)
+    return {
+        "opening": opening, "injections": injections, "withdrawals": withdrawals,
+        "repayments_received": repayments_received, "principal_disbursed": principal_disbursed,
+        "expenses_total": expenses_total, "payroll_paid": payroll_paid, "cash_on_hand": cash_on_hand,
+        "has_opening_entry": opening_row is not None,
+    }
+
+
 def capital_breakdown():
     """Every component of cash on hand, computed live (never cached) — the
     'how this is calculated' panel shows exactly this (Part 4.4)."""
     from sqlalchemy import func
 
-    opening_row = CapitalEntry.query.filter_by(entry_type="opening").order_by(CapitalEntry.created_at.desc()).first()
-    opening = opening_row.new_value if opening_row else Decimal("0")
-    injections = _sum(db.session.query(func.coalesce(func.sum(CapitalEntry.amount), 0)).filter_by(entry_type="injection").scalar())
-    withdrawals = _sum(db.session.query(func.coalesce(func.sum(CapitalEntry.amount), 0)).filter_by(entry_type="withdrawal").scalar())
-    repayments_received = _sum(db.session.query(func.coalesce(func.sum(Repayment.amount_paid), 0)).scalar())
-    principal_disbursed = _sum(
-        db.session.query(func.coalesce(func.sum(Loan.principal_amount), 0))
-        .filter(Loan.status.in_(["active", "closed"])).scalar()
-    )
-    expenses_total = _sum(db.session.query(func.coalesce(func.sum(Expense.amount), 0)).scalar())
-    from models import PayrollBatch
-    payroll_paid = sum(
-        (Decimal(str(line.net_pay)) for batch in PayrollBatch.query.filter_by(status="paid").all() for line in batch.lines),
-        Decimal("0"),
-    )
-    cash_on_hand = money(opening + injections - withdrawals + repayments_received - principal_disbursed - expenses_total - payroll_paid)
+    c = cash_on_hand_as_of(None)
+    opening, injections, withdrawals = c["opening"], c["injections"], c["withdrawals"]
+    repayments_received, principal_disbursed = c["repayments_received"], c["principal_disbursed"]
+    expenses_total, payroll_paid, cash_on_hand = c["expenses_total"], c["payroll_paid"], c["cash_on_hand"]
     loans_outstanding = _sum(
         db.session.query(func.coalesce(func.sum(Loan.outstanding_balance), 0)).filter(Loan.status == "active").scalar()
     )
@@ -1458,7 +1514,7 @@ def capital_breakdown():
         "total_disbursed": float(principal_disbursed),
         "assets_value": float(assets_value),
         "total_worth": float(total_worth),
-        "has_opening_entry": opening_row is not None,
+        "has_opening_entry": c["has_opening_entry"],
     }
 
 

@@ -47,16 +47,24 @@ def company_contacts():
     return "  |  ".join(parts)
 
 
-def excel_report(title, period, generated_by, kpis, columns, rows, numeric_cols=None, totals_row=None):
+def excel_report(title, period, generated_by, kpis, columns, rows, numeric_cols=None, totals_row=None, section_rows=None, subtotal_rows=None):
     """columns: header labels. rows: list of lists of raw values (numbers stay
     numbers, so Excel can sum them). numeric_cols: 0-based indexes formatted
-    as money. totals_row: optional list; numeric cells get a SUM formula."""
+    as money. totals_row: optional list; numeric cells get a SUM formula.
+    section_rows/subtotal_rows: 0-based indexes into `rows` styled bold (and
+    shaded, for a section row) for a statement with labeled sections — see
+    services/pdf.py's report_pdf, which takes the same two arguments."""
     numeric_cols = set(numeric_cols or [])
+    section_rows = set(section_rows or [])
+    subtotal_rows = set(subtotal_rows or [])
     primary = primary_hex()
     header_fill = PatternFill("solid", fgColor=primary)
     header_font = Font(color="FFFFFF", bold=True)
     totals_fill = PatternFill("solid", fgColor=LIGHT)
     totals_font = Font(bold=True)
+    section_fill = PatternFill("solid", fgColor=LIGHT)
+    section_font = Font(bold=True, color=primary)
+    subtotal_font = Font(bold=True)
     workbook = Workbook()
 
     summary = workbook.active
@@ -98,12 +106,20 @@ def excel_report(title, period, generated_by, kpis, columns, rows, numeric_cols=
 
     data_row_count = len(rows)
     for r in range(2, 2 + data_row_count):
+        row_index = r - 2  # 0-based, matching section_rows/subtotal_rows
+        is_section = row_index in section_rows
+        is_subtotal = row_index in subtotal_rows
         for c in range(1, len(columns) + 1):
             cell = sheet.cell(row=r, column=c)
             cell.border = BORDER
             if (c - 1) in numeric_cols:
                 cell.number_format = MONEY_FORMAT
                 cell.alignment = Alignment(horizontal="right")
+            if is_section:
+                cell.font = section_font
+                cell.fill = section_fill
+            elif is_subtotal:
+                cell.font = subtotal_font
 
     if totals_row is not None:
         total_r = 2 + data_row_count

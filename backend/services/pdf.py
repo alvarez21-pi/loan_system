@@ -309,13 +309,19 @@ def payslip_pdf(line):
     return _build(_payslip_story(line, _styles()), "Employee payslip")
 
 
-def report_pdf(title, period, generated_by, kpis, columns, rows, totals_row=None, landscape=False, numeric_cols=None):
+def report_pdf(title, period, generated_by, kpis, columns, rows, totals_row=None, landscape=False, numeric_cols=None, section_rows=None, subtotal_rows=None):
     """Generic report PDF: header/logo, title + period, KPI cards, a bordered
     zebra-striped table with right-aligned numeric columns and a bold totals
     row, repeated header row, page X of Y, confidentiality footer (Part 6.3).
 
     columns: list of header labels. rows: list of lists of already-formatted
     cell strings. numeric_cols: 0-based column indexes to right-align.
+    section_rows/subtotal_rows: 0-based indexes into `rows` (not `data`,
+    which also has the header) for a statement with labeled sections (e.g.
+    Cash Flow's "Operating Activities" / "Financing Activities") — a
+    section row is bold on a tinted band, a subtotal row is bold with a
+    thin rule above it, both distinct from an ordinary data row and from
+    the single final `totals_row`.
     """
     styles = _styles()
     pagesize = landscape_page(A4) if landscape else A4
@@ -365,6 +371,18 @@ def report_pdf(title, period, generated_by, kpis, columns, rows, totals_row=None
             ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
             ("LINEABOVE", (0, -1), (-1, -1), 0.8, accent_color()),
             ("BACKGROUND", (0, -1), (-1, -1), LIGHT),
+        ]
+    # rows[i] sits at data[i + 1] (data[0] is the header row).
+    for i in (section_rows or []):
+        style_cmds += [
+            ("FONTNAME", (0, i + 1), (-1, i + 1), "Helvetica-Bold"),
+            ("TEXTCOLOR", (0, i + 1), (-1, i + 1), primary_color()),
+            ("BACKGROUND", (0, i + 1), (-1, i + 1), LIGHT),
+        ]
+    for i in (subtotal_rows or []):
+        style_cmds += [
+            ("FONTNAME", (0, i + 1), (-1, i + 1), "Helvetica-Bold"),
+            ("LINEABOVE", (0, i + 1), (-1, i + 1), 0.6, colors.grey),
         ]
     table = Table(data, repeatRows=1)
     table.setStyle(TableStyle(style_cmds))
