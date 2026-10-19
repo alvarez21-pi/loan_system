@@ -7,7 +7,7 @@ from .accounting import (
 )
 from .audit import AuditLog
 from .backup import BackupLog
-from .borrower import Borrower, ID_TYPES
+from .borrower import Borrower, BorrowerEditRequest, BorrowerNote, ID_TYPES
 from .employee import DeductionType, Employee, EmployeeDeduction, LeaveRequest, PayrollBatch, PayrollDeductionLine, PayrollRun
 from .loan import Loan, LoanProduct, PaymentSchedule, Penalty, Repayment
 from .rate_limit import RateLimitAttempt
@@ -22,6 +22,8 @@ __all__ = [
     "AuditLog",
     "BackupLog",
     "Borrower",
+    "BorrowerEditRequest",
+    "BorrowerNote",
     "CapitalEntry",
     "DeductionType",
     "Employee",

@@ -9,6 +9,7 @@ from extensions import db
 from models import (
     AuditLog,
     Borrower,
+    BorrowerEditRequest,
     Expense,
     Loan,
     LoanProduct,
@@ -47,14 +48,29 @@ def list_borrowers(_current_user):
     # this same endpoint as a full borrower picker — reports, the loan
     # form, etc.) keep getting the complete, unpaginated list exactly as
     # before.
+    #
+    # active_only=true is a deliberate opt-in (default stays "everyone,
+    # exactly as before") so a deactivated borrower disappears from the
+    # NEW-loan borrower picker specifically, without quietly hiding them
+    # from the main Borrowers management page or a report's own picker
+    # (which may legitimately need to find an inactive borrower's history).
+    query = Borrower.query
+    if request.args.get("active_only") in ("true", "1"):
+        query = query.filter_by(is_active=True)
     rows, pagination = paginate(
-        Borrower.query,
+        query,
         request.args,
         searchable=(Borrower.name, Borrower.phone, Borrower.id_number),
         sortable={"name": Borrower.name, "phone": Borrower.phone, "created_at": Borrower.created_at},
         default_sort=Borrower.name,
     )
-    body = {"borrowers": [borrower_json(row) for row in rows]}
+    pending_by_borrower_id = {
+        req.borrower_id: req
+        for req in BorrowerEditRequest.query.filter(
+            BorrowerEditRequest.status == "pending", BorrowerEditRequest.borrower_id.in_([r.id for r in rows]),
+        ).all()
+    }
+    body = {"borrowers": [borrower_json(row, pending_by_borrower_id) for row in rows]}
     if pagination is not None:
         body["pagination"] = pagination
     return jsonify(body)
@@ -268,7 +284,10 @@ def dashboard_summary(_current_user):
     return jsonify(
         {
             "summary": {
-                "borrowers": Borrower.query.count(),
+                # Active only (Part: deactivated borrowers don't count
+                # toward an "active" dashboard figure) — total/all-time
+                # count is still available via the Borrowers page itself.
+                "borrowers": Borrower.query.filter_by(is_active=True).count(),
                 "loans": Loan.query.count(),
                 "active_loans": Loan.query.filter_by(status="active").count(),
                 # Was Loan.query.all() + summing in Python — loaded every

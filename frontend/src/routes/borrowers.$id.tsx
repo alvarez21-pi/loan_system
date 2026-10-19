@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import AppShell from "../components/AppShell";
 import { useEffect, useState } from "react";
-import { Button, Card, DataTable, InlineNote, PageHeader, StatusBadge, money } from "../components/lms-ui";
+import { Button, Card, DataTable, Field, Input, InlineNote, PageHeader, StatusBadge, money } from "../components/lms-ui";
 import useResource from "../hooks/useResource.js";
 import { borrowers, errorMessage, getUser, hasPermission, loans } from "../lib/api";
 import { showToast } from "../lib/toast";
@@ -76,9 +76,38 @@ function BorrowerDetail() {
   const canUpload = hasPermission(user, "borrowers:manage");
   const detail = useResource(() => borrowers.get(id), [id]);
   const loanList = useResource(() => loans.list(), []);
+  const notesList = useResource(() => borrowers.notes.list(id), [id]);
   const [version, setVersion] = useState(0);
   const [verifying, setVerifying] = useState(false);
+  const [noteText, setNoteText] = useState("");
+  const [noteBusy, setNoteBusy] = useState(false);
   const b: any = detail.data;
+
+  // The "ID pending" nudge below jumps here and suggests starter text —
+  // a convenience, never required: saving with no note at all is fine.
+  // Input (lms-ui.tsx) isn't ref-forwarding, so this uses its id instead.
+  function jumpToNoteField() {
+    setNoteText((current) => current || "ID not yet submitted — will follow up.");
+    const field = document.getElementById("borrower-note-input") as HTMLInputElement | null;
+    field?.scrollIntoView({ behavior: "smooth", block: "center" });
+    field?.focus();
+  }
+
+  async function addNote(e: React.FormEvent) {
+    e.preventDefault();
+    if (!noteText.trim()) return;
+    setNoteBusy(true);
+    try {
+      await borrowers.notes.create(id, noteText.trim());
+      setNoteText("");
+      showToast("Note added.", "success");
+      notesList.reload();
+    } catch (error) {
+      showToast(errorMessage(error), "danger");
+    } finally {
+      setNoteBusy(false);
+    }
+  }
 
   async function upload(kind: "photo" | "id-document", file: File | undefined) {
     if (!file) return;
@@ -126,6 +155,18 @@ function BorrowerDetail() {
       ) : !b ? (
         <Card>Borrower not found.</Card>
       ) : (
+        <>
+          {b.is_active === false ? (
+            <InlineNote tone="danger">
+              This borrower is deactivated — hidden from new-loan selection, but their history below is unchanged.
+            </InlineNote>
+          ) : null}
+          {b.pending_request ? (
+            <InlineNote tone="warning">
+              {b.pending_request.action === "edit" ? "An edit" : b.pending_request.action === "deactivate" ? "A deactivation" : "A deletion"} proposed by{" "}
+              {b.pending_request.created_by} is awaiting a Checker's approval. The details below are the CURRENT, unchanged record.
+            </InlineNote>
+          ) : null}
         <div className="grid gap-4 xl:grid-cols-[1fr_1.4fr]">
           <Card title="Details">
             <dl className="space-y-3 text-sm">
@@ -133,7 +174,6 @@ function BorrowerDetail() {
                 ["Full name", b.name],
                 ["Phone", b.phone],
                 ["ID type", ID_TYPES.find((t) => t.value === b.id_type)?.label || b.id_type],
-                ["ID number", b.id_number],
                 ["Address", b.address],
                 ["Registered", b.created_at],
               ].map(([label, value]) => (
@@ -142,6 +182,22 @@ function BorrowerDetail() {
                   <dd className="text-right font-medium">{value || "—"}</dd>
                 </div>
               ))}
+              <div className="flex justify-between gap-4 border-b border-border pb-2">
+                <dt className="text-muted-foreground">ID number</dt>
+                <dd className="text-right font-medium">
+                  {b.id_pending ? <span className="lms-badge lms-badge-warning">ID pending</span> : b.id_number}
+                </dd>
+              </div>
+              {/* The nudge Grace asked for: visible, actionable, never a
+                  gate — doesn't stop anything, including issuing a loan. */}
+              {b.id_pending ? (
+                <p className="-mt-1 text-right text-xs text-muted-foreground">
+                  No ID on file yet.{" "}
+                  <button type="button" onClick={jumpToNoteField} className="text-primary underline">
+                    Add a note explaining why
+                  </button>
+                </p>
+              ) : null}
               {/* Part 6.2: the whole verification row only ever appears once
                   a real provider is configured - never a permanent "not
                   configured" message sitting on every borrower's page. */}
@@ -213,7 +269,30 @@ function BorrowerDetail() {
               ]}
             />
           </Card>
+          <Card title="Notes" description="A timestamped, authored log — never overwritten.">
+            <form onSubmit={addNote} className="mb-3 flex gap-2">
+              <Input id="borrower-note-input" value={noteText} onChange={(e: any) => setNoteText(e.target.value)} placeholder="Add a note (e.g. why an ID is missing, a flag on this customer)…" />
+              <Button type="submit" disabled={noteBusy || !noteText.trim()}>{noteBusy ? "Adding…" : "Add"}</Button>
+            </form>
+            {notesList.loading ? (
+              <p className="text-sm text-muted-foreground">Loading…</p>
+            ) : (notesList.data || []).length === 0 ? (
+              <p className="text-sm text-muted-foreground">No notes yet.</p>
+            ) : (
+              <ul className="space-y-3">
+                {(notesList.data || []).map((n: any) => (
+                  <li key={n.id} className="border-b border-border pb-2 text-sm">
+                    <p>{n.text}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {n.author_name_snapshot} · {new Date(n.created_at).toLocaleString()}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
         </div>
+        </>
       )}
     </>
   );

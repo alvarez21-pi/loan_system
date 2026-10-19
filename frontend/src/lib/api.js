@@ -492,6 +492,7 @@ export const ENDPOINTS = {
   passwordResetValidate: "/api/auth/password-reset/validate",
   health: "/api/health",
   borrowers: "/api/borrowers",
+  borrowerEditRequests: "/api/borrower-edit-requests",
   loanProducts: "/api/loan-products",
   loans: "/api/loans",
   repayments: "/api/repayments",
@@ -618,7 +619,12 @@ export const borrowers = {
   async get(id) {
     return { data: toItem(await request(`${ENDPOINTS.borrowers}/${id}`), "borrower") };
   },
-  update: (id, data) => request(`${ENDPOINTS.borrowers}/${id}`, { method: "PUT", body: data }),
+  // Same endpoint as before, but no longer a live edit: this now PROPOSES
+  // the change (a pending borrower_edit_request) — the live record only
+  // changes once a Checker (or an eligible self-approver) approves it.
+  proposeEdit: (id, data) => request(`${ENDPOINTS.borrowers}/${id}`, { method: "PUT", body: data }),
+  proposeDelete: (id, reason) => request(`${ENDPOINTS.borrowers}/${id}/propose-delete`, { method: "POST", body: { reason } }),
+  reactivate: (id) => request(`${ENDPOINTS.borrowers}/${id}/reactivate`, { method: "POST", body: {} }),
   verifyId: (id) => request(`${ENDPOINTS.borrowers}/${id}/verify-id`, { method: "POST", body: {} }),
   upload(id, kind, file) {
     const form = new FormData();
@@ -631,6 +637,16 @@ export const borrowers = {
   fileBlob(id, kind) {
     return downloadBlob(`${ENDPOINTS.borrowers}/${id}/${kind}`);
   },
+  notes: {
+    list: (id) => list(`${ENDPOINTS.borrowers}/${id}/notes`, "borrower_notes"),
+    create: (id, text) => request(`${ENDPOINTS.borrowers}/${id}/notes`, { method: "POST", body: { text } }),
+  },
+};
+
+export const borrowerEditRequests = {
+  list: () => list(ENDPOINTS.borrowerEditRequests, "borrower_edit_requests"),
+  approve: (id) => request(`${ENDPOINTS.borrowerEditRequests}/${id}/approve`, { method: "POST", body: {} }),
+  reject: (id, rejection_reason) => request(`${ENDPOINTS.borrowerEditRequests}/${id}/reject`, { method: "POST", body: { rejection_reason } }),
 };
 
 export const loanProducts = {

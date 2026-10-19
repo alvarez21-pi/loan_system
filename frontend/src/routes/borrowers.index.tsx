@@ -9,11 +9,13 @@ import {
   Input,
   InlineNote,
   ListStatus,
+  Modal,
   PageHeader,
   Pagination,
   Select,
   SearchInput,
   StatusBadge,
+  TextLink,
   scrollToFirstError,
 } from "../components/lms-ui";
 import usePaginatedResource from "../hooks/usePaginatedResource.js";
@@ -55,6 +57,7 @@ function BorrowersPage() {
   const user = getUser();
   const navigate = useNavigate();
   const canCreate = hasPermission(user, "borrowers:manage");
+  const canReactivate = user?.role === "ceo" || user?.role === "head_manager";
   const list = usePaginatedResource((params: any) => borrowers.list(params) as Promise<{ data: any[]; pagination: any }>, []);
   const [form, setForm] = useState(EMPTY);
   const [photo, setPhoto] = useState<File | null>(null);
@@ -67,8 +70,84 @@ function BorrowersPage() {
   const [duplicate, setDuplicate] = useState<any>(null);
   const [busy, setBusy] = useState(false);
 
+  // The edit form PROPOSES a change (maker-checker, same as a loan) — it
+  // never writes to the borrower directly. editForm holds the pending
+  // field values; editTarget is the borrower it's proposed against.
+  const [editTarget, setEditTarget] = useState<any>(null);
+  const [editForm, setEditForm] = useState<any>(null);
+  const [editBusy, setEditBusy] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<any>(null);
+  const [deleteReason, setDeleteReason] = useState("");
+  const [deleteBusy, setDeleteBusy] = useState(false);
+
   function set(key: string, value: string) {
     setForm({ ...form, [key]: value });
+  }
+
+  function openEdit(row: any) {
+    setEditTarget(row);
+    setEditForm({ name: row.name, phone: row.phone, id_type: row.id_type || "nida", id_number: row.id_number || "", email: row.email || "", address: row.address || "" });
+  }
+
+  async function submitEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editTarget || !editForm) return;
+    setEditBusy(true);
+    try {
+      const result: any = await borrowers.proposeEdit(editTarget.id, editForm);
+      if (result?.message === "No changes to propose.") {
+        showToast("No changes to propose.", "info");
+      } else {
+        showToast("Edit proposed — it will apply once a Checker approves it.", "success");
+        if (result?.duplicate_warning) {
+          setDuplicate(result.duplicate_warning);
+          showToast(result.duplicate_warning.message, "warning");
+        }
+      }
+      setEditTarget(null);
+      setEditForm(null);
+      list.reload();
+    } catch (error) {
+      showToast(errorMessage(error), "danger");
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
+  function openDelete(row: any) {
+    setDeleteTarget(row);
+    setDeleteReason("");
+  }
+
+  async function submitDelete() {
+    if (!deleteTarget) return;
+    setDeleteBusy(true);
+    try {
+      await borrowers.proposeDelete(deleteTarget.id, deleteReason || undefined);
+      showToast(
+        deleteTarget.has_loan_history
+          ? "Deactivation proposed — it will apply once a Checker approves it."
+          : "Deletion proposed — it will apply once a Checker approves it.",
+        "success",
+      );
+      setDeleteTarget(null);
+      list.reload();
+    } catch (error) {
+      showToast(errorMessage(error), "danger");
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
+
+  async function reactivate(row: any) {
+    if (!window.confirm(`Reactivate ${row.name}? They will reappear in new-loan selection.`)) return;
+    try {
+      await borrowers.reactivate(row.id);
+      showToast(`${row.name} reactivated.`, "success");
+      list.reload();
+    } catch (error) {
+      showToast(errorMessage(error), "danger");
+    }
   }
 
   function validate() {
@@ -76,7 +155,8 @@ function BorrowersPage() {
     if (!form.name.trim()) next.name = "Full name is required.";
     if (!form.phone.trim()) next.phone = "Phone number is required.";
     else if (!/^\+?\d{7,15}$/.test(form.phone.replace(/\s/g, ""))) next.phone = "Enter 7–15 digits.";
-    if (!form.id_number.trim()) next.id_number = "ID number is required.";
+    // ID is optional at creation ("ID pending") — never a gate on
+    // anything, including a loan; just a flag so staff can track and note why.
     if (!form.address.trim()) next.address = "Address is required.";
     for (const [key, file] of [["photo", photo], ["id_document", idDocument]] as const) {
       if (!file) continue;
@@ -105,14 +185,22 @@ function BorrowersPage() {
       setPhoto(null);
       setIdDocument(null);
       setFileKey((n) => n + 1);
-      showToast(result?.warning ? `Borrower saved. ${result.warning}` : "Borrower saved.", "success");
+      // A same-ID/phone match is now a WARNING, never a hard block — the
+      // borrower IS saved either way; this just surfaces the possible
+      // coincidence with a link to each matching record (Part 3.3).
+      if (result?.duplicate_warning) {
+        setDuplicate(result.duplicate_warning);
+        showToast(`Borrower saved. ${result.duplicate_warning.message}`, "warning");
+      } else {
+        showToast(result?.warning ? `Borrower saved. ${result.warning}` : "Borrower saved.", "success");
+      }
       list.reload();
     } catch (error: any) {
-      // A duplicate ID (409) carries a link to the existing borrower instead
-      // of a plain message (Part 3.3) — kept inline since a toast can't hold
-      // a clickable action; every other failure is a toast only.
+      // An EXACT ID-number collision still hard-blocks at the database
+      // (two people can never genuinely share one national ID) — a
+      // different, 409 path from the soft duplicate_warning above.
       if (error?.payload?.existing_borrower_id) {
-        setDuplicate(error.payload);
+        setDuplicate({ message: error.payload.message, matches: [{ id: error.payload.existing_borrower_id, name: error.payload.existing_borrower_name }] });
         showToast(error.payload.message, "danger");
       } else {
         showToast(errorMessage(error), "danger");
@@ -141,16 +229,29 @@ function BorrowersPage() {
               order={list.order}
               onSort={list.toggleSort}
               columns={[
-                { key: "name", label: "Name", sortKey: "name" },
+                {
+                  key: "name",
+                  label: "Name",
+                  sortKey: "name",
+                  render: (r: any) => (
+                    <span className={r.is_active === false ? "text-muted-foreground" : ""}>
+                      {r.name}
+                      {r.is_active === false ? <span className="ml-2 lms-badge lms-badge-danger">Inactive</span> : null}
+                    </span>
+                  ),
+                },
                 { key: "phone", label: "Phone", sortKey: "phone" },
                 {
                   key: "id_number",
                   label: "ID",
-                  render: (r: any) => (
-                    <span>
-                      {r.id_number} <span className="text-xs text-muted-foreground">({ID_TYPES.find((t) => t.value === r.id_type)?.label || r.id_type})</span>
-                    </span>
-                  ),
+                  render: (r: any) =>
+                    r.id_pending ? (
+                      <span className="lms-badge lms-badge-warning">ID pending</span>
+                    ) : (
+                      <span>
+                        {r.id_number} <span className="text-xs text-muted-foreground">({ID_TYPES.find((t) => t.value === r.id_type)?.label || r.id_type})</span>
+                      </span>
+                    ),
                 },
                 // Part 6.2: no ID-verification column at all while no provider
                 // is configured — never a column full of "not configured".
@@ -162,7 +263,7 @@ function BorrowersPage() {
                         // Never "pending"/"approved" here — that vocabulary means
                         // maker-checker elsewhere in the app, and borrowers have no
                         // approval step at all (Part 2).
-                        render: (r: any) => <StatusBadge status={r.id_verified ? "verified" : "unverified"} />,
+                        render: (r: any) => (r.id_pending ? "—" : <StatusBadge status={r.id_verified ? "verified" : "unverified"} />),
                       },
                     ]
                   : []),
@@ -171,9 +272,32 @@ function BorrowersPage() {
                   key: "actions",
                   label: "",
                   render: (r: any) => (
-                    <Link to="/borrowers/$id" params={{ id: String(r.id) }} className="lms-btn lms-btn-outline" onClick={(e) => e.stopPropagation()}>
-                      View
-                    </Link>
+                    <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                      <Link to="/borrowers/$id" params={{ id: String(r.id) }} className="lms-btn lms-btn-outline">
+                        View
+                      </Link>
+                      {canCreate && r.is_active !== false ? (
+                        <>
+                          <TextLink
+                            disabled={Boolean(r.pending_request)}
+                            onClick={() => openEdit(r)}
+                          >
+                            Edit
+                          </TextLink>
+                          <TextLink tone="danger" disabled={Boolean(r.pending_request)} onClick={() => openDelete(r)}>
+                            Delete
+                          </TextLink>
+                        </>
+                      ) : null}
+                      {canReactivate && r.is_active === false ? (
+                        <TextLink onClick={() => reactivate(r)}>Reactivate</TextLink>
+                      ) : null}
+                      {r.pending_request ? (
+                        <span className="text-xs text-muted-foreground">
+                          {r.pending_request.action === "edit" ? "Edit" : r.pending_request.action === "deactivate" ? "Deactivation" : "Deletion"} pending
+                        </span>
+                      ) : null}
+                    </div>
                   ),
                 },
               ]}
@@ -182,11 +306,18 @@ function BorrowersPage() {
               mobileCard={(r: any) => (
                 <div>
                   <div className="flex items-start justify-between gap-3">
-                    <p className="min-w-0 truncate font-medium">{r.name}</p>
-                    {r.id_verification_configured ? <StatusBadge status={r.id_verified ? "verified" : "unverified"} /> : null}
+                    <p className="min-w-0 truncate font-medium">
+                      {r.name}
+                      {r.is_active === false ? <span className="ml-2 lms-badge lms-badge-danger">Inactive</span> : null}
+                    </p>
+                    {r.id_pending ? (
+                      <span className="lms-badge lms-badge-warning">ID pending</span>
+                    ) : r.id_verification_configured ? (
+                      <StatusBadge status={r.id_verified ? "verified" : "unverified"} />
+                    ) : null}
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {r.phone} · {r.id_number}
+                    {r.phone} · {r.id_pending ? "No ID on file" : r.id_number}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">{r.address}</p>
                 </div>
@@ -200,11 +331,16 @@ function BorrowersPage() {
           <Card title="Add borrower">
             <form onSubmit={onSubmit} className="space-y-3" noValidate>
               {duplicate ? (
-                <InlineNote tone="danger">
+                <InlineNote tone="warning">
                   {duplicate.message}{" "}
-                  <Link to="/borrowers/$id" params={{ id: String(duplicate.existing_borrower_id) }} className="underline">
-                    View {duplicate.existing_borrower_name}'s record
-                  </Link>
+                  {(duplicate.matches || []).map((m: any, i: number) => (
+                    <span key={m.id}>
+                      {i > 0 ? ", " : ""}
+                      <Link to="/borrowers/$id" params={{ id: String(m.id) }} className="underline">
+                        View {m.name}'s record
+                      </Link>
+                    </span>
+                  ))}
                 </InlineNote>
               ) : null}
               <Field label="Full name" name="name" error={errors.name}>
@@ -223,10 +359,14 @@ function BorrowersPage() {
                 </Select>
               </Field>
               <Field
-                label="ID number"
+                label="ID number (optional)"
                 name="id_number"
                 error={errors.id_number}
-                hint={form.id_type === "nida" ? "Typically 20 digits." : undefined}
+                hint={
+                  form.id_type === "nida"
+                    ? "Typically 20 digits. Leave blank if not submitted yet — doesn't stop a loan being issued."
+                    : "Leave blank if not submitted yet — doesn't stop a loan being issued."
+                }
               >
                 <Input value={form.id_number} aria-invalid={Boolean(errors.id_number)} onChange={(e: any) => set("id_number", e.target.value)} />
               </Field>
@@ -246,6 +386,61 @@ function BorrowersPage() {
           </Card>
         ) : null}
       </div>
+
+      {editTarget && editForm ? (
+        <Modal title={`Propose an edit — ${editTarget.name}`} description="Applies only once a Checker approves it." onClose={() => setEditTarget(null)} size="sm">
+          <form onSubmit={submitEdit} className="space-y-3" noValidate>
+            <Field label="Full name">
+              <Input value={editForm.name} onChange={(e: any) => setEditForm({ ...editForm, name: e.target.value })} />
+            </Field>
+            <Field label="Phone">
+              <Input value={editForm.phone} onChange={(e: any) => setEditForm({ ...editForm, phone: e.target.value })} />
+            </Field>
+            <Field label="ID type">
+              <Select value={editForm.id_type} onChange={(e: any) => setEditForm({ ...editForm, id_type: e.target.value })}>
+                {ID_TYPES.map((t) => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="ID number" hint="Leave blank for ID pending.">
+              <Input value={editForm.id_number} onChange={(e: any) => setEditForm({ ...editForm, id_number: e.target.value })} />
+            </Field>
+            <Field label="Email">
+              <Input value={editForm.email} onChange={(e: any) => setEditForm({ ...editForm, email: e.target.value })} />
+            </Field>
+            <Field label="Address">
+              <Input value={editForm.address} onChange={(e: any) => setEditForm({ ...editForm, address: e.target.value })} />
+            </Field>
+            <div className="flex gap-2 pt-1">
+              <Button type="submit" disabled={editBusy} className="flex-1">{editBusy ? "Proposing…" : "Propose edit"}</Button>
+              <Button type="button" variant="outline" onClick={() => setEditTarget(null)}>Cancel</Button>
+            </div>
+          </form>
+        </Modal>
+      ) : null}
+
+      {deleteTarget ? (
+        <Modal title={`Delete — ${deleteTarget.name}`} onClose={() => setDeleteTarget(null)} size="sm">
+          <div className="space-y-3">
+            <InlineNote tone={deleteTarget.has_loan_history ? "warning" : "danger"}>
+              {deleteTarget.has_loan_history
+                ? "This borrower has loan history, so this will DEACTIVATE them (soft delete) — they stay correct in their existing loan records but disappear from new-loan selection. This can be reversed later."
+                : "This borrower has no loan history, so this will be a PERMANENT deletion once approved — it cannot be undone."}
+              {" "}This proposal still needs a Checker's approval, same as an edit.
+            </InlineNote>
+            <Field label="Reason (optional)">
+              <Input value={deleteReason} onChange={(e: any) => setDeleteReason(e.target.value)} />
+            </Field>
+            <div className="flex gap-2 pt-1">
+              <Button variant="danger" disabled={deleteBusy} onClick={submitDelete} className="flex-1">
+                {deleteBusy ? "Proposing…" : deleteTarget.has_loan_history ? "Propose deactivation" : "Propose deletion"}
+              </Button>
+              <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
     </>
   );
 }

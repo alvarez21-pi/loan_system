@@ -67,7 +67,8 @@ function LoansPage() {
   // server-paginated/searchable one (Phase 5).
   const pendingList = useResource(() => loans.list(), []);
   const list = usePaginatedResource((params: any) => loans.list(params) as Promise<{ data: any[]; pagination: any }>, []);
-  const borrowerList = useResource(() => borrowers.list(), []);
+  // A deactivated borrower must not be selectable for a NEW loan.
+  const borrowerList = useResource(() => borrowers.list({ active_only: true }), []);
   const productList = useResource(() => loanProducts.list(), []);
   const [form, setForm] = useState<any>(EMPTY);
   const [errors, setErrors] = useState<Record<string, string>>({});

@@ -27,7 +27,8 @@ function DashboardPage() {
   const canSeeAudit = hasPermission(user, "audit:view");
   const canSeeCapital = hasPermission(user, "capital:view");
   const canSeeBackup = hasPermission(user, "backup:manage");
-  const b = useResource(() => borrowers.list(), []);
+  // Active only — a deactivated borrower shouldn't count toward this figure.
+  const b = useResource(() => borrowers.list({ active_only: true }), []);
   const l = useResource(() => loans.list(), []);
   const a = useResource(() => (canSeeAudit ? auditLogs.list() : Promise.resolve({ data: [] })), []);
   const capitalSummary = useResource(() => (canSeeCapital ? capital.summary() : Promise.resolve({ data: null })), []);
@@ -59,7 +60,7 @@ function DashboardPage() {
       {/* Phone pass: 2 columns even below the `sm` breakpoint (360-412px),
           not stacked single-column, per the phone-first dashboard spec. */}
       <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
-        <StatCard label="Total borrowers" value={fmtNumber((b.data || []).length)} />
+        <StatCard label="Active borrowers" value={fmtNumber((b.data || []).length)} />
         <StatCard label="Active loans" value={fmtNumber(active)} />
         <StatCard label="Pending approvals" value={fmtNumber(pending)} hint="Loans awaiting a checker" />
         <StatCard label="Outstanding balance" value={money(outstanding)} />

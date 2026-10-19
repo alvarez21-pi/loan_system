@@ -5,7 +5,7 @@ import { Button, Card, DataTable, InlineNote, PageHeader, StatusBadge, fmtNumber
 import { LeaveDecisionModal } from "../components/LeaveDecisionModal";
 import useAutoRefresh from "../hooks/useAutoRefresh.js";
 import useResource from "../hooks/useResource.js";
-import { errorMessage, getUser, hasPermission, leaveRequests, loans, penalties } from "../lib/api";
+import { borrowerEditRequests, errorMessage, getUser, hasPermission, leaveRequests, loans, penalties } from "../lib/api";
 import { showToast } from "../lib/toast";
 
 export const Route = createFileRoute("/approvals")({
@@ -39,11 +39,13 @@ function ApprovalsPage() {
   const loanQueue = useResource(() => loans.list(), []);
   const penaltyQueue = useResource(() => penalties.list(), []);
   const leaveQueue = useResource(() => leaveRequests.list(), []);
+  const borrowerQueue = useResource(() => borrowerEditRequests.list(), []);
 
   useAutoRefresh(() => {
     loanQueue.reload();
     penaltyQueue.reload();
     leaveQueue.reload();
+    borrowerQueue.reload();
   });
 
   async function act(kind: string, key: string, api: any, resource: any, row: any, decision: "approve" | "reject", consequence: string) {
@@ -88,7 +90,8 @@ function ApprovalsPage() {
   const loanRows = (loanQueue.data || []).filter(decidable);
   const penaltyRows = (penaltyQueue.data || []).filter(decidable);
   const leaveRows = (leaveQueue.data || []).filter(decidable);
-  const total = loanRows.length + penaltyRows.length + leaveRows.length;
+  const borrowerRows = (borrowerQueue.data || []).filter(decidable);
+  const total = loanRows.length + penaltyRows.length + leaveRows.length + borrowerRows.length;
 
   return (
     <>
@@ -96,7 +99,7 @@ function ApprovalsPage() {
         title="Approvals"
         description={`${fmtNumber(total)} item${total === 1 ? "" : "s"} waiting for your decision.`}
       />
-      <InlineNote tone="danger">{loanQueue.error || penaltyQueue.error || leaveQueue.error}</InlineNote>
+      <InlineNote tone="danger">{loanQueue.error || penaltyQueue.error || leaveQueue.error || borrowerQueue.error}</InlineNote>
 
       <div className="space-y-4">
         {hasPermission(user, "loans:approve") ? (
@@ -146,6 +149,44 @@ function ApprovalsPage() {
                 { key: "created_by_name", label: "Added by" },
                 decisionColumn("Penalty", "penalty", penalties, penaltyQueue, (r) =>
                   `This will approve a ${money(r.amount)} penalty, adding it to Loan #${r.loan_id} (${r.borrower_name})'s outstanding balance.`),
+              ]}
+            />
+          </Card>
+        ) : null}
+
+        {hasPermission(user, "borrowers:approve") ? (
+          <Card title="Borrower changes" description={`${fmtNumber(borrowerRows.length)} pending`}>
+            <DataTable
+              rows={borrowerRows}
+              empty={borrowerQueue.loading ? "Loading…" : "No borrower edits or deletions waiting for approval."}
+              columns={[
+                {
+                  key: "borrower",
+                  label: "Borrower",
+                  render: (r: any) => (
+                    <Link to="/borrowers/$id" params={{ id: String(r.borrower_id) }} className="text-primary underline">
+                      {r.borrower_name}
+                    </Link>
+                  ),
+                },
+                {
+                  key: "action",
+                  label: "Action",
+                  render: (r: any) =>
+                    r.action === "edit"
+                      ? `Edit: ${Object.keys(r.changes || {}).join(", ")}`
+                      : r.action === "deactivate"
+                        ? "Deactivate (soft delete)"
+                        : "Delete (no loan history)",
+                },
+                { key: "reason", label: "Reason", render: (r: any) => r.reason || "—" },
+                { key: "creator_name_snapshot", label: "Proposed by" },
+                decisionColumn("Borrower change", "borrower", borrowerEditRequests, borrowerQueue, (r) =>
+                  r.action === "edit"
+                    ? `This will apply the proposed change${Object.keys(r.changes || {}).length === 1 ? "" : "s"} to ${r.borrower_name}: ${Object.entries(r.changes || {}).map(([f, c]: any) => `${f} -> ${c.new}`).join(", ")}.`
+                    : r.action === "deactivate"
+                      ? `This will deactivate ${r.borrower_name}. They will stay visible in their existing loan history but disappear from new-loan selection.`
+                      : `This will permanently delete ${r.borrower_name} (no loan history exists for them).`),
               ]}
             />
           </Card>

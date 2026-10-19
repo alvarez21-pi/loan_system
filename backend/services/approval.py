@@ -1,4 +1,8 @@
-"""Maker-checker, still narrowed to loans and penalties only.
+"""Maker-checker: loans, penalties, and borrower edit/delete proposals
+(borrower_edit_requests — the live Borrower row is never touched until
+one of these is approved). Leave requests are approved separately
+(department_manager/head_manager/ceo only — see decide_leave() in
+routes/operations.py), never through this module.
 
 `has_permission()` already encodes both "can this tier ever hold this
 permission" (role) and, for a department_manager only, "is the record's
@@ -34,7 +38,7 @@ def _approver_capable(user, permission):
     if user.role in FULL_ACCESS_ROLES:
         return True
     if user.role == "checker":
-        return permission == "loans:approve"  # never leave, never a penalty
+        return permission in ("loans:approve", "borrowers:approve")  # never leave, never a penalty
     return False  # maker never approves anything
 
 

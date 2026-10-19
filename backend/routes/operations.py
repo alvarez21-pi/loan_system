@@ -14,6 +14,8 @@ from models import (
     Asset,
     AssetType,
     Borrower,
+    BorrowerEditRequest,
+    BorrowerNote,
     CapitalEntry,
     Employee,
     Expense,
@@ -272,8 +274,12 @@ def remove_borrower_file(borrower_id, name):
             pass
 
 
-def borrower_json(borrower):
-    """Borrower fields for the API. Stored file names never leave the server."""
+def borrower_json(borrower, pending_by_borrower_id=None):
+    """Borrower fields for the API. Stored file names never leave the server.
+
+    pending_by_borrower_id: optional {borrower_id: BorrowerEditRequest} for
+    the one 'pending' row (if any), pre-fetched by the caller in ONE query
+    for a whole list — avoids an N+1 (one pending-request lookup per row)."""
     data = json_row(borrower)
     data.pop("photo_path", None)
     data.pop("id_document_path", None)
@@ -282,7 +288,46 @@ def borrower_json(borrower):
     # Part 6.2: the verification UI only shows when a provider is actually
     # configured - never a permanent "not configured" message.
     data["id_verification_configured"] = is_configured()
+    data["id_pending"] = borrower.id_number in (None, "")
+    data["has_loan_history"] = borrower.has_loan_history
+    pending = (
+        pending_by_borrower_id.get(borrower.id) if pending_by_borrower_id is not None
+        else BorrowerEditRequest.query.filter_by(borrower_id=borrower.id, status="pending").first()
+    )
+    data["pending_request"] = (
+        {"id": pending.id, "action": pending.action, "created_by": pending.creator_name_snapshot, "created_at": pending.created_at.isoformat()}
+        if pending else None
+    )
     return data
+
+
+def borrower_edit_request_json(req, user=None):
+    data = json_row(req)
+    data["borrower_name"] = req.borrower.name if req.borrower else req.borrower_name_snapshot
+    data["borrower_active"] = req.borrower.is_active if req.borrower else None
+    if user is not None:
+        # Drives the Approvals page's Approve/Reject buttons — same
+        # approval_denial() rule every other maker-checker queue uses.
+        data["can_decide"] = can_decide(user, req)
+    return data
+
+
+def find_duplicate_borrowers(id_type, id_number, phone, exclude_borrower_id=None):
+    """Existing borrowers sharing this ID (when one is given) or this phone
+    — used as a WARNING (never a hard block) on both create and edit. The
+    borrower's own row is excluded on an edit so it never flags itself."""
+    matches = []
+    if id_number:
+        query = Borrower.query.filter_by(id_type=id_type, id_number=id_number)
+        if exclude_borrower_id is not None:
+            query = query.filter(Borrower.id != exclude_borrower_id)
+        matches += query.all()
+    if phone:
+        query = Borrower.query.filter_by(phone=phone)
+        if exclude_borrower_id is not None:
+            query = query.filter(Borrower.id != exclude_borrower_id)
+        matches += [b for b in query.all() if b.id not in {m.id for m in matches}]
+    return matches
 
 
 @operations_bp.post("/borrowers")
@@ -291,29 +336,52 @@ def create_borrower(user):
     # JSON (no files) and multipart/form-data (with photo / ID document) are both accepted.
     multipart = (request.mimetype or "").startswith("multipart/")
     data = request.form if multipart else (request.get_json(silent=True) or {})
-    required = ["name", "phone", "id_number"]
+    # id_number is now OPTIONAL at creation ("ID pending") — only name and
+    # phone are required. A borrower with no ID is flagged id_pending=True
+    # (borrower_json) until it's filled in — purely informational (the list
+    # badge, and the UI's nudge toward adding a note explaining why); it
+    # never blocks anything, including issuing them a loan.
+    required = ["name", "phone"]
     if any(not str(data.get(field) or "").strip() for field in required):
-        return error("name, phone, and id_number are required")
+        return error("name and phone are required")
 
     id_type = (data.get("id_type") or "nida").strip().lower()
     if id_type not in ID_TYPES:
         return error(f"id_type must be one of: {', '.join(ID_TYPES)}")
-    id_number = str(data["id_number"]).strip()
+    id_number = str(data.get("id_number") or "").strip() or None
     warning = None
-    if id_type == "nida":
+    if id_number and id_type == "nida":
         id_number = normalize_nida(id_number)
         if len(id_number) != 20:
             # Soft warning only — the real NIDA format has not been confirmed
             # against physical cards yet, so this never blocks saving (Part 3.2).
             warning = f"NIDA numbers are usually 20 digits; this one has {len(id_number)}. Double-check it before saving."
 
-    existing = Borrower.query.filter_by(id_type=id_type, id_number=id_number).first()
-    if existing:
-        return jsonify({
-            "message": f"A borrower with this {id_type.replace('_', ' ')} number already exists.",
-            "existing_borrower_id": existing.id,
-            "existing_borrower_name": existing.name,
-        }), 409
+    # An EXACT id_type+id_number match still hard-blocks — two people can
+    # never genuinely share one national ID, and uq_borrowers_id_type_number
+    # would refuse the insert anyway (this just gives a clearer message with
+    # a link to the existing record, before even touching the database).
+    if id_number:
+        exact = Borrower.query.filter_by(id_type=id_type, id_number=id_number).first()
+        if exact:
+            return jsonify({
+                "message": f"A borrower with this {id_type.replace('_', ' ')} number already exists.",
+                "existing_borrower_id": exact.id,
+                "existing_borrower_name": exact.name,
+            }), 409
+
+    # Anything short of that exact match (same PHONE, or an ID that merely
+    # looks similar) is a WARNING, never a hard block — a maker decides
+    # whether it's a genuine coincidence and proceeds. A structured list
+    # (not just a string) so the frontend can link straight to each match.
+    duplicates = find_duplicate_borrowers(id_type, None, (data.get("phone") or "").strip())
+    duplicate_warning = (
+        {
+            "message": f"{len(duplicates)} existing borrower(s) share this phone number.",
+            "matches": [{"id": d.id, "name": d.name} for d in duplicates],
+        }
+        if duplicates else None
+    )
 
     uploads = {}
     if multipart:
@@ -338,41 +406,109 @@ def create_borrower(user):
         return error("this ID number is already registered", 409)
     for kind, (content, extension) in uploads.items():
         store_borrower_file(borrower, kind, content, extension)
-    audit(user, "CREATE", "borrowers", borrower.id)
+    audit(user, "CREATE", "borrowers", borrower.id, details=(duplicate_warning or {}).get("message"))
     db.session.commit()
     body = {"borrower": borrower_json(borrower)}
     if warning:
         body["warning"] = warning
+    if duplicate_warning:
+        body["duplicate_warning"] = duplicate_warning
     return jsonify(body), 201
 
 
 @operations_bp.put("/borrowers/<int:borrower_id>")
 @permission_required("borrowers:manage")
-def update_borrower(user, borrower_id):
+def propose_borrower_edit(user, borrower_id):
+    """An edit is PROPOSED, never applied live — the same maker-checker
+    control loans already have (services/approval.py), extended to
+    borrowers. The live Borrower row is untouched until a Checker (or an
+    eligible self-approver — see approval_denial()) approves the pending
+    borrower_edit_requests row this creates. At most one pending request
+    per borrower at a time (checked here; the partial unique index in the
+    migration is the race-proof backstop)."""
     borrower = Borrower.query.get_or_404(borrower_id)
+    if BorrowerEditRequest.query.filter_by(borrower_id=borrower.id, status="pending").first():
+        return error("this borrower already has a pending edit or delete request awaiting approval", 409)
+
     data = request.get_json(silent=True) or {}
+    changes = {}
     try:
-        for field in ("name", "phone", "email", "address"):
+        for field in ("name", "phone"):
             if field in data:
-                setattr(borrower, field, (data[field] or None) if field in ("email", "address") else str(data[field]).strip())
+                new_value = str(data[field] or "").strip()
+                if not new_value:
+                    raise ValueError(f"{field} cannot be blank")
+                if new_value != (getattr(borrower, field) or ""):
+                    changes[field] = {"old": getattr(borrower, field), "new": new_value}
+        for field in ("email", "address"):
+            if field in data:
+                new_value = data[field] or None
+                if new_value != getattr(borrower, field):
+                    changes[field] = {"old": getattr(borrower, field), "new": new_value}
         if "id_type" in data or "id_number" in data:
             id_type = (data.get("id_type") or borrower.id_type).strip().lower()
-            id_number = str(data.get("id_number") or borrower.id_number).strip()
             if id_type not in ID_TYPES:
                 raise ValueError(f"id_type must be one of: {', '.join(ID_TYPES)}")
-            if id_type == "nida":
+            raw_id_number = data.get("id_number", borrower.id_number)
+            id_number = str(raw_id_number).strip() or None if raw_id_number is not None else None
+            if id_number and id_type == "nida":
                 id_number = normalize_nida(id_number)
-            borrower.id_type, borrower.id_number = id_type, id_number
-            borrower.id_verified = False
-            borrower.id_verified_at = None
+            if id_type != borrower.id_type:
+                changes["id_type"] = {"old": borrower.id_type, "new": id_type}
+            if id_number != borrower.id_number:
+                changes["id_number"] = {"old": borrower.id_number, "new": id_number}
     except (TypeError, ValueError) as exc:
         return error(str(exc))
+
+    if not changes:
+        return jsonify({"message": "No changes to propose.", "borrower": borrower_json(borrower)})
+
+    duplicate_warning = None
+    if "id_number" in changes or "phone" in changes:
+        new_id_type = changes.get("id_type", {}).get("new", borrower.id_type)
+        new_id_number = changes.get("id_number", {}).get("new", borrower.id_number)
+        new_phone = changes.get("phone", {}).get("new", borrower.phone)
+        # An EXACT id match hard-blocks here too — not just a warning — so a
+        # proposal that could never actually be approved (it would hit
+        # uq_borrowers_id_type_number the moment it's applied) is never
+        # created in the first place.
+        if new_id_number:
+            exact = Borrower.query.filter(
+                Borrower.id_type == new_id_type, Borrower.id_number == new_id_number, Borrower.id != borrower.id,
+            ).first()
+            if exact:
+                return jsonify({
+                    "message": f"A borrower with this {new_id_type.replace('_', ' ')} number already exists.",
+                    "existing_borrower_id": exact.id,
+                    "existing_borrower_name": exact.name,
+                }), 409
+        duplicates = find_duplicate_borrowers(new_id_type, None, new_phone, exclude_borrower_id=borrower.id)
+        if duplicates:
+            duplicate_warning = {
+                "message": f"{len(duplicates)} existing borrower(s) share this phone number.",
+                "matches": [{"id": d.id, "name": d.name} for d in duplicates],
+            }
+
+    request_row = BorrowerEditRequest(
+        borrower_id=borrower.id, borrower_name_snapshot=borrower.name, action="edit", changes=changes,
+        reason=data.get("reason"), created_by=user.id, creator_name_snapshot=user.name,
+    )
+    db.session.add(request_row)
     try:
-        db.session.commit()
+        db.session.flush()
     except IntegrityError:
+        # The partial unique index's race-proof backstop: someone else's
+        # proposal for this same borrower landed between the check above
+        # and this insert.
         db.session.rollback()
-        return error("this ID number is already registered", 409)
-    return jsonify({"borrower": borrower_json(borrower)})
+        return error("this borrower already has a pending edit or delete request awaiting approval", 409)
+    detail = "; ".join(f"{f}: {c['old']!r} -> {c['new']!r}" for f, c in changes.items())
+    audit(user, "PROPOSE_EDIT", "borrowers", borrower.id, details=detail)
+    db.session.commit()
+    body = {"borrower_edit_request": borrower_edit_request_json(request_row)}
+    if duplicate_warning:
+        body["duplicate_warning"] = duplicate_warning
+    return jsonify(body), 201
 
 
 @operations_bp.post("/borrowers/<int:borrower_id>/verify-id")
@@ -543,6 +679,12 @@ def create_loan(user):
         borrower = Borrower.query.get(int(data["borrower_id"]))
         if not borrower:
             return error("borrower not found", 404)
+        if not borrower.is_active:
+            return error("this borrower is deactivated and cannot be issued a new loan", 409)
+        # No ID-on-file gate here (Part: ID pending) — a loan can be issued
+        # to an ID-pending borrower normally; the id_pending flag/badge and
+        # the notes feature are how staff track and explain the gap, not a
+        # block on lending.
         principal = parse_money(data.get("principal_amount"), "principal_amount", min_value=Decimal("1"))
 
         product_id = data.get("loan_product_id")
@@ -579,6 +721,13 @@ def create_loan(user):
         interest_rate=rate, term_months=term, start_date=start_date, status="pending_approval",
         outstanding_balance=principal, created_by=user.id, creator_name_snapshot=user.name,
         rounding_step=company_rounding_step(),
+        # Captured once, now, at issuance — the loan's own document (the
+        # schedule PDF) reads these, never the live borrower record, so an
+        # edit approved on the borrower LATER never rewrites this loan's
+        # already-issued paperwork.
+        borrower_name_snapshot=borrower.name, borrower_phone_snapshot=borrower.phone,
+        borrower_id_type_snapshot=borrower.id_type, borrower_id_number_snapshot=borrower.id_number,
+        borrower_address_snapshot=borrower.address,
     )
     db.session.add(loan)
     db.session.flush()
@@ -1151,8 +1300,9 @@ def already_handled_response(record, table):
 
 
 def decide_record(user, model, record_id, status, table):
-    """Shared approve/reject flow for loans and penalties — the only two
-    categories still under maker-checker (Part 1.1).
+    """Shared approve/reject flow for loans, penalties, and borrower edit/
+    delete requests (Part 1.1 extended to borrowers — same control, not a
+    second one).
 
     Phase 2 item 4: the row is locked (SELECT ... FOR UPDATE) before the
     status is read, so a second concurrent approve/reject for the same
@@ -1175,6 +1325,13 @@ def decide_record(user, model, record_id, status, table):
         record.rejection_reason = reason
     if status == "approved" and isinstance(record, Penalty) and record.loan.status != "active":
         return error("penalties can only be applied to an active loan", 409)
+    if status == "approved" and isinstance(record, BorrowerEditRequest):
+        if record.borrower is None:
+            return error("the borrower this request was for no longer exists", 409)
+        if record.action == "hard_delete" and record.borrower.has_loan_history:
+            # Re-checked here, not just at proposal time: a loan could have
+            # been created for this borrower in the meantime.
+            return error("this borrower now has loan history and can no longer be hard-deleted — reject this and propose a deactivation instead", 409)
     try:
         # Phase 2 item 4: everything from here through commit() is inside
         # the guard — a lazy-loaded relationship access (record.loan below)
@@ -1193,10 +1350,25 @@ def decide_record(user, model, record_id, status, table):
             if isinstance(record, Penalty):
                 record.loan.outstanding_balance = money(record.loan.outstanding_balance + record.amount)
                 resync_open_row_interest(record.loan)
+            if isinstance(record, BorrowerEditRequest):
+                borrower = record.borrower
+                if record.action == "edit":
+                    for field, change in record.changes.items():
+                        setattr(borrower, field, change["new"])
+                    if "id_type" in record.changes or "id_number" in record.changes:
+                        borrower.id_verified = False
+                        borrower.id_verified_at = None
+                elif record.action == "deactivate":
+                    borrower.deactivate()
+                elif record.action == "hard_delete":
+                    db.session.delete(borrower)
         # No self-approved flag/badge of any kind under the tier model (Part 2) —
         # a department_manager+ approving their own record is recorded exactly
         # like any other approval.
-        audit(user, status.upper(), table, record.id)
+        detail = None
+        if isinstance(record, BorrowerEditRequest) and status == "approved" and record.action == "edit":
+            detail = "; ".join(f"{f}: {c['old']!r} -> {c['new']!r}" for f, c in record.changes.items())
+        audit(user, status.upper(), table, record.id, details=detail)
         db.session.commit()
     except StaleDataError:
         # Phase 2 item 4: lost the race (e.g. a concurrent penalty approval
@@ -1208,6 +1380,12 @@ def decide_record(user, model, record_id, status, table):
         if fresh is not None and fresh.status not in PENDING_STATUSES:
             return already_handled_response(fresh, table)
         return retry_conflict_response()
+    except IntegrityError:
+        # Only reachable for a BorrowerEditRequest edit: another borrower
+        # independently acquired the same ID between this proposal and its
+        # approval. Rare, but a clean error beats a raw 500.
+        db.session.rollback()
+        return error("applying this edit would duplicate another borrower's ID number — reject this request and ask for it to be re-proposed", 409)
     if status == "approved" and isinstance(record, Loan):
         deliver_loan_schedule(record)
     return jsonify({table.rstrip("s"): json_row(record)})
@@ -1250,6 +1428,105 @@ def approve_loan(user, record_id): return decide_record(user, Loan, record_id, "
 @operations_bp.post("/loans/<int:record_id>/reject")
 @auth_required
 def reject_loan(user, record_id): return decide_record(user, Loan, record_id, "rejected", "loan")
+
+
+# ---------------------------------------------------------- borrower edit/delete (maker-checker)
+
+@operations_bp.get("/borrower-edit-requests")
+@permission_required("borrowers:manage", "borrowers:approve", any_of=True)
+def list_borrower_edit_requests(user):
+    """Every request (any status) — the Approvals page filters to 'pending'
+    client-side, same pattern as loans/penalties/leave."""
+    rows = BorrowerEditRequest.query.order_by(BorrowerEditRequest.created_at.desc()).all()
+    return jsonify({"borrower_edit_requests": [borrower_edit_request_json(r, user) for r in rows]})
+
+
+@operations_bp.post("/borrowers/<int:borrower_id>/propose-delete")
+@permission_required("borrowers:manage")
+def propose_borrower_delete(user, borrower_id):
+    """Delete (soft or hard) is a HIGHER-risk action than an edit, not a
+    lower one — it goes through the exact same maker-checker request, just
+    with action='deactivate' or 'hard_delete'. Which one is allowed is
+    decided here from the borrower's OWN loan history, not from anything
+    the client sends: any loan history at all -> soft delete only."""
+    borrower = Borrower.query.get_or_404(borrower_id)
+    if not borrower.is_active:
+        return error("this borrower is already deactivated", 409)
+    if BorrowerEditRequest.query.filter_by(borrower_id=borrower.id, status="pending").first():
+        return error("this borrower already has a pending edit or delete request awaiting approval", 409)
+    action = "deactivate" if borrower.has_loan_history else "hard_delete"
+    data = request.get_json(silent=True) or {}
+    request_row = BorrowerEditRequest(
+        borrower_id=borrower.id, borrower_name_snapshot=borrower.name, action=action, changes={},
+        reason=data.get("reason"), created_by=user.id, creator_name_snapshot=user.name,
+    )
+    db.session.add(request_row)
+    try:
+        db.session.flush()
+    except IntegrityError:
+        db.session.rollback()
+        return error("this borrower already has a pending edit or delete request awaiting approval", 409)
+    audit(user, "PROPOSE_DELETE", "borrowers", borrower.id, details=f"action={action}; reason={data.get('reason') or '-'}")
+    db.session.commit()
+    return jsonify({"borrower_edit_request": borrower_edit_request_json(request_row)}), 201
+
+
+@operations_bp.post("/borrower-edit-requests/<int:record_id>/approve")
+@auth_required
+def approve_borrower_edit_request(user, record_id):
+    return decide_record(user, BorrowerEditRequest, record_id, "approved", "borrower_edit_request")
+
+
+@operations_bp.post("/borrower-edit-requests/<int:record_id>/reject")
+@auth_required
+def reject_borrower_edit_request(user, record_id):
+    return decide_record(user, BorrowerEditRequest, record_id, "rejected", "borrower_edit_request")
+
+
+@operations_bp.post("/borrowers/<int:borrower_id>/reactivate")
+@auth_required
+def reactivate_borrower(user, borrower_id):
+    """Direct action, NOT maker-checker — restricted to Head Manager or
+    above instead (undoing a mistaken deactivation is corrective, the same
+    shape as a CEO correcting opening capital, not a new risk needing a
+    second approver)."""
+    if user.role not in ("ceo", "head_manager"):
+        return error("only the CEO or Head Manager can reactivate a borrower", 403)
+    borrower = Borrower.query.get_or_404(borrower_id)
+    if borrower.is_active:
+        return error("this borrower is already active", 409)
+    borrower.reactivate()
+    audit(user, "REACTIVATE", "borrowers", borrower.id)
+    db.session.commit()
+    return jsonify({"borrower": borrower_json(borrower)})
+
+
+@operations_bp.get("/borrowers/<int:borrower_id>/notes")
+@permission_required("borrowers:view", "borrowers:manage", any_of=True)
+def list_borrower_notes(user, borrower_id):
+    Borrower.query.get_or_404(borrower_id)
+    rows = BorrowerNote.query.filter_by(borrower_id=borrower_id).order_by(BorrowerNote.created_at.desc()).all()
+    return jsonify({"borrower_notes": [json_row(r) for r in rows]})
+
+
+@operations_bp.post("/borrowers/<int:borrower_id>/notes")
+@permission_required("borrowers:manage")
+def create_borrower_note(user, borrower_id):
+    """Posted directly — no approval needed. Informational only (why an ID
+    is missing, a flag on the customer), never a change to the borrower's
+    own financial/identity data, so it doesn't need the maker-checker
+    control the edit/delete actions above go through."""
+    borrower = Borrower.query.get_or_404(borrower_id)
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return error("text is required")
+    note = BorrowerNote(borrower_id=borrower.id, text=text, author_id=user.id, author_name_snapshot=user.name)
+    db.session.add(note)
+    db.session.flush()
+    audit(user, "ADD_NOTE", "borrowers", borrower.id)
+    db.session.commit()
+    return jsonify({"borrower_note": json_row(note)}), 201
 
 
 @operations_bp.get("/loans/<int:loan_id>/schedule/export")

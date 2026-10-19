@@ -187,7 +187,16 @@ def schedule_pdf(loan):
         Paragraph(f"Repayment Schedule — Loan #{loan.id}", styles["title"]),
         _kv_table(
             [
-                ["Borrower", loan.borrower.name if loan.borrower else "-", "Principal", fmt_money(loan.principal_amount)],
+                [
+                    "Borrower",
+                    # The snapshot taken AT ISSUANCE (routes/operations.py's
+                    # create_loan) — never the live borrower record, so an
+                    # edit approved on the borrower later never rewrites
+                    # this already-issued document. Falls back to the live
+                    # name only for a loan created before this existed.
+                    loan.borrower_name_snapshot or (loan.borrower.name if loan.borrower else "-"),
+                    "Principal", fmt_money(loan.principal_amount),
+                ],
                 ["Product", loan.loan_product.name if loan.loan_product else "-", "Monthly Interest Rate", f"{loan.interest_rate}% per month (reducing balance)"],
                 ["Start date", loan.start_date.isoformat(), "Term", f"{loan.term_months} months"],
                 ["Status", str(loan.status).replace("_", " ").title(), "Outstanding balance", fmt_money(loan.outstanding_balance)],

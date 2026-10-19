@@ -124,7 +124,7 @@ def has_module_access(user, module):
 # Every "<area>:<verb>" permission string used across the codebase, mapped to
 # the module it belongs to. This is the ONLY place that mapping lives.
 PERMISSION_MODULE = {
-    "borrowers:view": "borrowers", "borrowers:manage": "borrowers",
+    "borrowers:view": "borrowers", "borrowers:manage": "borrowers", "borrowers:approve": "borrowers",
     "loans:view": "loans", "loans:create": "loans", "loans:approve": "loans",
     # Loan products are configuration for the loans module, not a separate
     # one — a Loans Manager (department_manager, loans_credit) manages them
@@ -155,6 +155,7 @@ PERMISSION_MODULE = {
 # department_manager and above hold those.
 CHECKER_PERMISSIONS = {
     "loans:approve",  # ANY loan, no department restriction
+    "borrowers:approve",  # ANY borrower edit/delete proposal, same maker-checker extension as loans
     "borrowers:manage", "repayments:record", "expenses:manage", "penalties:create", "leave:request",  # create
 }
 MAKER_PERMISSIONS = {

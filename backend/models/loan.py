@@ -42,6 +42,18 @@ class Loan(db.Model):
     # automatically, and this column is filtered/joined on constantly
     # (a borrower's own loan list, repayment allocation, reports).
     borrower_id = db.Column(db.Integer, db.ForeignKey("borrowers.id"), nullable=False, index=True)
+    # Captured once, at loan creation — the borrower's identity details as
+    # they were AT ISSUANCE. The schedule PDF (the actual loan document a
+    # borrower holds) reads these, never the live borrower record, so
+    # editing a borrower later never silently rewrites already-issued
+    # paperwork. Everything else (loan lists, reports) still reads the
+    # live borrower.name on purpose — those are current-state operational
+    # views, not frozen documents.
+    borrower_name_snapshot = db.Column(db.String(160), nullable=True)
+    borrower_phone_snapshot = db.Column(db.String(30), nullable=True)
+    borrower_id_type_snapshot = db.Column(db.String(20), nullable=True)
+    borrower_id_number_snapshot = db.Column(db.String(80), nullable=True)
+    borrower_address_snapshot = db.Column(db.Text, nullable=True)
     # Null for a negotiated/custom loan (Part 4.2) — the Maker enters
     # principal/rate/term directly instead of picking a product. When a
     # product IS selected, its rate and term are locked (Part 4.3): the loan
