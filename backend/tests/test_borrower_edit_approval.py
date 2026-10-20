@@ -1,17 +1,23 @@
 """Borrower edit/delete/reactivate/notes — the staging test plan from the
 client-feedback request, as automated tests.
 
-An EDIT applies IMMEDIATELY (Grace's correction: unlike loans/penalties, a
-borrower edit is not routed through a Checker) — the audit trail still
-records the old/new value of every field changed. Delete (soft or hard)
-still goes through the SAME maker-checker approval model loans use
-(models/borrower.py's BorrowerEditRequest, services/approval.py unchanged)
-— that part was not changed. Loan documents snapshot the borrower at
-issuance, deletion is soft when there's loan history, hard only when there
-is none, duplicate ID/phone is a warning not a block, ID is optional at
-creation and never blocks loan issuance (a borrower with no ID is just
+Both EDIT and DELETE (soft or hard) apply IMMEDIATELY now (Grace's
+correction, in two rounds: edits first, then delete to match) — unlike
+loans/penalties, neither goes through a Checker any more. The audit trail
+still records who did what, to what, and when, exactly as before; only the
+second-person approval step is gone. Loan documents snapshot the borrower
+at issuance, deletion is soft when there's loan history, hard only when
+there is none, duplicate ID/phone is a warning not a block, ID is optional
+at creation and never blocks loan issuance (a borrower with no ID is just
 flagged id_pending — the notes feature is how staff record why), and notes
-are an append-only authored log."""
+are an append-only authored log.
+
+BorrowerEditRequest/the /borrower-edit-requests approve-reject endpoints
+still exist (services/approval.py unchanged) but are never written to by
+anything any more — kept only so a request that was already pending from
+before this change has somewhere to be resolved. No test here creates a
+new one; that machinery is exercised by test_workflows.py's loan/penalty
+coverage instead, which still genuinely uses it."""
 import pytest
 
 from models import AuditLog
@@ -24,7 +30,6 @@ def staff(make_user, auth_headers):
         "head_manager": make_user("head_manager"),
         "maker": make_user("maker"),
         "checker": make_user("checker"),
-        "checker2": make_user("checker", email="checker2@example.com"),
     }
     users = {role: pair[0] for role, pair in people.items()}
     headers = {role: auth_headers(pair[0].email, pair[1]) for role, pair in people.items()}
@@ -99,8 +104,7 @@ def test_edit_on_borrower_with_no_loan_history(client, staff):
 
 def test_two_sequential_edits_both_apply_immediately_no_approval_queue(client, staff):
     """There is no 'pending edit' state any more — a second edit right
-    after the first is never blocked (contrast with delete, below, which
-    still queues for approval)."""
+    after the first is never blocked."""
     _, headers = staff
     borrower = make_borrower(client, headers, tag="e3")
     first = client.put(f"/api/borrowers/{borrower['id']}", json={"phone": "0799000222"}, headers=headers["maker"])
@@ -111,29 +115,32 @@ def test_two_sequential_edits_both_apply_immediately_no_approval_queue(client, s
     assert updated["phone"] == "0799000333"
 
 
-def test_edit_is_blocked_while_a_delete_request_is_pending(client, staff):
+def test_an_edit_is_never_blocked_by_a_prior_delete_attempt(client, staff):
+    """Regression for the bug this round's audit found: a leftover pending
+    row used to wrongly block a later edit with a confusing 409 ("pending
+    deactivate/delete request"). Delete is immediate now too, so there is
+    nothing left to leave 'pending' and block anything — proven here by
+    deleting-then-reactivating-then-editing the same borrower in one go."""
     _, headers = staff
     borrower = make_borrower(client, headers, tag="e4")
-    propose = client.post(f"/api/borrowers/{borrower['id']}/propose-delete", json={}, headers=headers["maker"])
-    assert propose.status_code == 201, propose.get_json()
-    blocked = client.put(f"/api/borrowers/{borrower['id']}", json={"phone": "0799000444"}, headers=headers["maker"])
-    assert blocked.status_code == 409
-    assert "pending" in blocked.get_json()["message"].lower()
+    make_loan_for(client, headers, borrower["id"], tag="e4")  # loan history -> deactivate (reversible), not hard delete
+    deleted = client.post(f"/api/borrowers/{borrower['id']}/delete", json={}, headers=headers["maker"])
+    assert deleted.status_code == 200, deleted.get_json()
+    client.post(f"/api/borrowers/{borrower['id']}/reactivate", headers=headers["head_manager"])
+    edited = client.put(f"/api/borrowers/{borrower['id']}", json={"phone": "0799000444"}, headers=headers["maker"])
+    assert edited.status_code == 200, edited.get_json()
 
 
-# --------------------------------------------------------------- 2. delete (still maker-checker)
+# --------------------------------------------------------------- 2. delete (now also immediate)
 
-def test_delete_borrower_with_loan_history_soft_deletes_and_keeps_loan_history_correct(client, staff):
+def test_delete_borrower_with_loan_history_deactivates_immediately_and_keeps_loan_history_correct(client, staff):
     _, headers = staff
     borrower = make_borrower(client, headers, tag="d1")
     loan = make_loan_for(client, headers, borrower["id"], tag="d1")
 
-    propose = client.post(f"/api/borrowers/{borrower['id']}/propose-delete", json={"reason": "duplicate account"}, headers=headers["maker"])
-    assert propose.status_code == 201, propose.get_json()
-    req = propose.get_json()["borrower_edit_request"]
-    assert req["action"] == "deactivate"
-    approve = client.post(f"/api/borrower-edit-requests/{req['id']}/approve", headers=headers["checker"])
-    assert approve.status_code == 200, approve.get_json()
+    deleted = client.post(f"/api/borrowers/{borrower['id']}/delete", json={"reason": "duplicate account"}, headers=headers["maker"])
+    assert deleted.status_code == 200, deleted.get_json()
+    assert deleted.get_json()["borrower"]["is_active"] is False
 
     gone_from_active = client.get("/api/borrowers", query_string={"active_only": "true"}, headers=headers["maker"])
     assert borrower["id"] not in [b["id"] for b in gone_from_active.get_json()["borrowers"]]
@@ -148,27 +155,64 @@ def test_delete_borrower_with_loan_history_soft_deletes_and_keeps_loan_history_c
     assert loan_after["borrower_name_snapshot"] == borrower["name"]
 
 
-def test_delete_borrower_with_no_loan_history_hard_deletes(client, staff):
+def test_delete_borrower_with_no_loan_history_hard_deletes_immediately(client, staff):
     _, headers = staff
     borrower = make_borrower(client, headers, tag="d2")
-    propose = client.post(f"/api/borrowers/{borrower['id']}/propose-delete", json={}, headers=headers["maker"])
-    assert propose.status_code == 201
-    req = propose.get_json()["borrower_edit_request"]
-    assert req["action"] == "hard_delete"
-    approve = client.post(f"/api/borrower-edit-requests/{req['id']}/approve", headers=headers["checker"])
-    assert approve.status_code == 200, approve.get_json()
+    deleted = client.post(f"/api/borrowers/{borrower['id']}/delete", json={}, headers=headers["maker"])
+    assert deleted.status_code == 200, deleted.get_json()
 
     gone = client.get(f"/api/borrowers/{borrower['id']}", headers=headers["maker"])
     assert gone.status_code == 404
+
+
+def test_deleting_an_already_deactivated_borrower_is_rejected(client, staff):
+    _, headers = staff
+    borrower = make_borrower(client, headers, tag="d4")
+    make_loan_for(client, headers, borrower["id"], tag="d4")  # loan history -> deactivate, not hard-delete
+    first = client.post(f"/api/borrowers/{borrower['id']}/delete", json={}, headers=headers["maker"])
+    assert first.status_code == 200
+    second = client.post(f"/api/borrowers/{borrower['id']}/delete", json={}, headers=headers["maker"])
+    assert second.status_code == 409
+
+
+def test_a_checker_can_also_delete_directly_no_second_approver_needed(client, staff):
+    """borrowers:manage (which both maker and checker hold) is the only
+    gate now — there is no separate approver role for this any more."""
+    _, headers = staff
+    borrower = make_borrower(client, headers, tag="d5")
+    deleted = client.post(f"/api/borrowers/{borrower['id']}/delete", json={}, headers=headers["checker"])
+    assert deleted.status_code == 200, deleted.get_json()
+
+
+def test_neither_a_deactivated_nor_a_hard_deleted_borrower_ever_appears_in_the_new_loan_picker(client, staff):
+    """The new-loan borrower picker (frontend: loans.index.tsx) always
+    calls GET /api/borrowers?active_only=true. Deletion is immediate now
+    (item 4) — confirming here there's no leftover staleness: both the
+    soft-deleted and the hard-deleted borrower vanish from that list the
+    moment they're deleted, no approval step/delay involved any more."""
+    _, headers = staff
+    soft = make_borrower(client, headers, tag="pick1")
+    make_loan_for(client, headers, soft["id"], tag="pick1")  # loan history -> deactivate
+    hard = make_borrower(client, headers, tag="pick2")  # no loan history -> hard delete
+
+    before = client.get("/api/borrowers", query_string={"active_only": "true"}, headers=headers["maker"]).get_json()["borrowers"]
+    assert soft["id"] in [b["id"] for b in before]
+    assert hard["id"] in [b["id"] for b in before]
+
+    client.post(f"/api/borrowers/{soft['id']}/delete", json={}, headers=headers["maker"])
+    client.post(f"/api/borrowers/{hard['id']}/delete", json={}, headers=headers["maker"])
+
+    after = client.get("/api/borrowers", query_string={"active_only": "true"}, headers=headers["maker"]).get_json()["borrowers"]
+    after_ids = [b["id"] for b in after]
+    assert soft["id"] not in after_ids
+    assert hard["id"] not in after_ids
 
 
 def test_reactivate_a_soft_deleted_borrower(client, staff):
     _, headers = staff
     borrower = make_borrower(client, headers, tag="d3")
     make_loan_for(client, headers, borrower["id"], tag="d3")
-    propose = client.post(f"/api/borrowers/{borrower['id']}/propose-delete", json={}, headers=headers["maker"])
-    req = propose.get_json()["borrower_edit_request"]
-    client.post(f"/api/borrower-edit-requests/{req['id']}/approve", headers=headers["checker"])
+    client.post(f"/api/borrowers/{borrower['id']}/delete", json={}, headers=headers["maker"])
 
     # A checker/maker cannot reactivate — Head Manager or CEO only.
     denied = client.post(f"/api/borrowers/{borrower['id']}/reactivate", headers=headers["checker"])
@@ -263,42 +307,7 @@ def test_notes_are_timestamped_authored_and_never_overwritten(client, staff):
         assert n["created_at"]
 
 
-# --------------------------------------------------------------- 6. maker-checker rule preserved (delete only)
-
-def test_maker_checker_self_approval_rules_carry_over_to_borrower_delete(client, staff):
-    """Edits no longer go through approval at all, so there is no
-    self-approval question left to ask about them — but delete still does,
-    and the same rule set (never maker/checker, CEO/Head Manager/Dept
-    Manager exempt) must still hold there."""
-    _, headers = staff
-    borrower = make_borrower(client, headers, tag="s1")
-
-    # A checker who PROPOSED their own delete cannot approve it (never exempt).
-    propose = client.post(f"/api/borrowers/{borrower['id']}/propose-delete", json={}, headers=headers["checker"])
-    req = propose.get_json()["borrower_edit_request"]
-    self_approve = client.post(f"/api/borrower-edit-requests/{req['id']}/approve", headers=headers["checker"])
-    assert self_approve.status_code == 403
-
-    # A DIFFERENT checker can.
-    other_approve = client.post(f"/api/borrower-edit-requests/{req['id']}/approve", headers=headers["checker2"])
-    assert other_approve.status_code == 200, other_approve.get_json()
-
-    # A maker never gets to approve at all, even someone else's.
-    borrower2 = make_borrower(client, headers, tag="s2")
-    propose2 = client.post(f"/api/borrowers/{borrower2['id']}/propose-delete", json={}, headers=headers["maker"])
-    req2 = propose2.get_json()["borrower_edit_request"]
-    maker_tries = client.post(f"/api/borrower-edit-requests/{req2['id']}/approve", headers=headers["maker"])
-    assert maker_tries.status_code == 403
-
-    # CEO is exempt from self-approval (same rule as loans).
-    borrower3 = make_borrower(client, headers, tag="s3")
-    propose3 = client.post(f"/api/borrowers/{borrower3['id']}/propose-delete", json={}, headers=headers["ceo"])
-    req3 = propose3.get_json()["borrower_edit_request"]
-    ceo_self_approve = client.post(f"/api/borrower-edit-requests/{req3['id']}/approve", headers=headers["ceo"])
-    assert ceo_self_approve.status_code == 200, ceo_self_approve.get_json()
-
-
-# --------------------------------------------------------------- 7. audit trail
+# --------------------------------------------------------------- 6. audit trail
 
 def test_audit_log_captures_edit_delete_reactivate_and_notes(client, staff):
     _, headers = staff
@@ -310,9 +319,8 @@ def test_audit_log_captures_edit_delete_reactivate_and_notes(client, staff):
     edit_resp = client.put(f"/api/borrowers/{edited['id']}", json={"phone": "0722000000"}, headers=headers["maker"])
     assert edit_resp.status_code == 200, edit_resp.get_json()
 
-    propose_del = client.post(f"/api/borrowers/{deleted['id']}/propose-delete", json={"reason": "test"}, headers=headers["maker"])
-    del_req = propose_del.get_json()["borrower_edit_request"]
-    client.post(f"/api/borrower-edit-requests/{del_req['id']}/approve", headers=headers["checker"])
+    delete_resp = client.post(f"/api/borrowers/{deleted['id']}/delete", json={"reason": "test"}, headers=headers["maker"])
+    assert delete_resp.status_code == 200, delete_resp.get_json()
     client.post(f"/api/borrowers/{deleted['id']}/reactivate", headers=headers["ceo"])
 
     borrower_actions = {
@@ -321,19 +329,20 @@ def test_audit_log_captures_edit_delete_reactivate_and_notes(client, staff):
             AuditLog.table_name == "borrowers", AuditLog.record_id.in_([edited["id"], deleted["id"]]),
         ).all()
     }
-    # EDIT is applied and logged directly against the borrower now (no more
-    # PROPOSE_EDIT/APPROVED pair) — PROPOSE_DELETE/REACTIVATE are unchanged.
-    assert {"CREATE", "ADD_NOTE", "EDIT", "PROPOSE_DELETE", "REACTIVATE"}.issubset(borrower_actions)
-    # The delete DECISION is still filed under the request it decided, not
-    # the borrower directly — same separation loans/penalties already have.
-    request_actions = {
-        log.action
-        for log in AuditLog.query.filter_by(table_name="borrower_edit_request").all()
-        if log.record_id == del_req["id"]
-    }
-    assert request_actions == {"APPROVED"}
-    for log in AuditLog.query.filter(
-        AuditLog.table_name.in_(["borrowers", "borrower_edit_request"]),
-    ).all():
+    # Both EDIT and DEACTIVATE are now applied and logged directly against
+    # the borrower — no more PROPOSE_*/APPROVED pair for either.
+    assert {"CREATE", "ADD_NOTE", "EDIT", "DEACTIVATE", "REACTIVATE"}.issubset(borrower_actions)
+    for log in AuditLog.query.filter_by(table_name="borrowers").all():
         assert log.actor_name_snapshot
         assert log.timestamp
+
+
+def test_audit_log_captures_hard_delete_before_the_row_is_gone(client, staff):
+    _, headers = staff
+    borrower = make_borrower(client, headers, tag="a3")
+    resp = client.post(f"/api/borrowers/{borrower['id']}/delete", json={"reason": "never contacted us again"}, headers=headers["maker"])
+    assert resp.status_code == 200
+    audited = AuditLog.query.filter_by(table_name="borrowers", record_id=borrower["id"], action="HARD_DELETE").first()
+    assert audited is not None
+    assert audited.details == "never contacted us again"
+    assert audited.actor_name_snapshot

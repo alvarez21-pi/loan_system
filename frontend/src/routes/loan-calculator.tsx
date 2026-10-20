@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import AppShell from "../components/AppShell";
-import { Button, Card, DataTable, Field, Input, MoneyInput, NumberInput, PageHeader, fmtNumber, money } from "../components/lms-ui";
+import { Button, Card, DataTable, Field, Input, MoneyInput, NumberInput, PageHeader, Select, fmtNumber, money } from "../components/lms-ui";
 import { calculator, errorMessage } from "../lib/api";
 import { localDateString as today } from "../lib/utils";
 import { showToast } from "../lib/toast";
@@ -10,7 +10,7 @@ export const Route = createFileRoute("/loan-calculator")({
   head: () => ({
     meta: [
       { title: "Loan Calculator — Microfinance LMS" },
-      { name: "description", content: "Quote a reducing-balance schedule for a prospective borrower." },
+      { name: "description", content: "Quote a reducing-balance or interest-only schedule for a prospective borrower." },
     ],
   }),
   component: () => (
@@ -21,7 +21,7 @@ export const Route = createFileRoute("/loan-calculator")({
 });
 
 function CalculatorPage() {
-  const [form, setForm] = useState({ principal: "", interest_rate: "", term_months: "", start_date: today() });
+  const [form, setForm] = useState({ loan_type: "reducing_balance", principal: "", interest_rate: "", term_months: "", start_date: today() });
   const [result, setResult] = useState<any>(null);
   const [busy, setBusy] = useState(false);
 
@@ -33,12 +33,17 @@ function CalculatorPage() {
     }
     setBusy(true);
     try {
+      // Same calculator.preview() endpoint the loan-creation form's own
+      // live preview uses, which runs the exact schedule-building code
+      // (services.loan_calculator.build_loan_schedule, dispatched by
+      // loan_type) that an actual loan is built and rebuilt with — never
+      // a second, calculator-only implementation.
       setResult(
         await calculator.preview({
           principal: Number(form.principal),
           interest_rate: Number(form.interest_rate),
           term_months: Number(form.term_months),
-          interest_type: "reducing_balance",
+          loan_type: form.loan_type,
           start_date: form.start_date || undefined,
         }),
       );
@@ -55,6 +60,12 @@ function CalculatorPage() {
       <div className="grid gap-4 xl:grid-cols-[1fr_1.8fr]">
         <Card title="Preview inputs">
           <form className="space-y-3" onSubmit={submit} noValidate>
+            <Field label="Loan type">
+              <Select value={form.loan_type} onChange={(e: any) => setForm({ ...form, loan_type: e.target.value })}>
+                <option value="reducing_balance">Reducing balance (EMI)</option>
+                <option value="interest_only">Interest-only (lump sum principal at the end)</option>
+              </Select>
+            </Field>
             <Field label="Principal">
               <MoneyInput value={form.principal} onValueChange={(v) => setForm({ ...form, principal: v })} />
             </Field>

@@ -46,7 +46,7 @@ export const ID_TYPES: { value: string; label: string }[] = [
   { value: "other", label: "Other" },
 ];
 
-const EMPTY = { name: "", phone: "", id_type: "nida", id_number: "", address: "" };
+const EMPTY = { name: "", phone: "", id_type: "nida", id_number: "", address: "", id_pending_note: "" };
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 // A photo or an ID document scan — the latter is very often a PDF, not a
 // photo (Part 3.1).
@@ -123,11 +123,9 @@ function BorrowersPage() {
     if (!deleteTarget) return;
     setDeleteBusy(true);
     try {
-      await borrowers.proposeDelete(deleteTarget.id, deleteReason || undefined);
+      await borrowers.remove(deleteTarget.id, deleteReason || undefined);
       showToast(
-        deleteTarget.has_loan_history
-          ? "Deactivation proposed — it will apply once a Checker approves it."
-          : "Deletion proposed — it will apply once a Checker approves it.",
+        deleteTarget.has_loan_history ? `${deleteTarget.name} deactivated.` : `${deleteTarget.name} permanently deleted.`,
         "success",
       );
       setDeleteTarget(null);
@@ -180,7 +178,14 @@ function BorrowersPage() {
     if (!validate()) return;
     setBusy(true);
     try {
-      const result: any = await borrowers.create(form, { photo: photo || undefined, id_document: idDocument || undefined });
+      // id_pending_note isn't a borrower field — it's posted separately,
+      // as the borrower's first note, once the borrower actually exists.
+      const { id_pending_note, ...payload } = form;
+      const result: any = await borrowers.create(payload, { photo: photo || undefined, id_document: idDocument || undefined });
+      const newBorrowerId = result?.borrower?.id;
+      if (newBorrowerId && !payload.id_number.trim() && id_pending_note.trim()) {
+        await borrowers.notes.create(newBorrowerId, id_pending_note.trim());
+      }
       setForm(EMPTY);
       setPhoto(null);
       setIdDocument(null);
@@ -278,13 +283,8 @@ function BorrowersPage() {
                       </Link>
                       {canCreate && r.is_active !== false ? (
                         <>
-                          <TextLink
-                            disabled={Boolean(r.pending_request)}
-                            onClick={() => openEdit(r)}
-                          >
-                            Edit
-                          </TextLink>
-                          <TextLink tone="danger" disabled={Boolean(r.pending_request)} onClick={() => openDelete(r)}>
+                          <TextLink onClick={() => openEdit(r)}>Edit</TextLink>
+                          <TextLink tone="danger" onClick={() => openDelete(r)}>
                             Delete
                           </TextLink>
                         </>
@@ -292,9 +292,13 @@ function BorrowersPage() {
                       {canReactivate && r.is_active === false ? (
                         <TextLink onClick={() => reactivate(r)}>Reactivate</TextLink>
                       ) : null}
+                      {/* Only a request from before edit/delete stopped
+                          needing approval can ever still be 'pending' —
+                          informational only, nothing above is blocked by
+                          it. Resolve it on the Approvals page. */}
                       {r.pending_request ? (
                         <span className="text-xs text-muted-foreground">
-                          {r.pending_request.action === "edit" ? "Edit" : r.pending_request.action === "deactivate" ? "Deactivation" : "Deletion"} pending
+                          Legacy {r.pending_request.action === "edit" ? "edit" : r.pending_request.action === "deactivate" ? "deactivation" : "deletion"} request awaiting approval
                         </span>
                       ) : null}
                     </div>
@@ -364,12 +368,25 @@ function BorrowersPage() {
                 error={errors.id_number}
                 hint={
                   form.id_type === "nida"
-                    ? "Typically 20 digits. Leave blank if not submitted yet — doesn't stop a loan being issued."
-                    : "Leave blank if not submitted yet — doesn't stop a loan being issued."
+                    ? "Typically 20 digits. Leave blank if not submitted yet."
+                    : "Leave blank if not submitted yet."
                 }
               >
                 <Input value={form.id_number} aria-invalid={Boolean(errors.id_number)} onChange={(e: any) => set("id_number", e.target.value)} />
               </Field>
+              {/* The nudge Grace asked for, moved to the moment it matters —
+                  right when ID is left blank, not after the fact on the
+                  profile page. Optional, never required: this just posts
+                  as the borrower's first note once they're saved. */}
+              {!form.id_number.trim() ? (
+                <Field label="Note: why is the ID missing? (optional)" name="id_pending_note">
+                  <Input
+                    value={form.id_pending_note}
+                    placeholder="e.g. ID not yet submitted — will follow up."
+                    onChange={(e: any) => set("id_pending_note", e.target.value)}
+                  />
+                </Field>
+              ) : null}
               <Field label="Address" name="address" error={errors.address}>
                 <Input value={form.address} aria-invalid={Boolean(errors.address)} onChange={(e: any) => set("address", e.target.value)} />
               </Field>
@@ -425,16 +442,16 @@ function BorrowersPage() {
           <div className="space-y-3">
             <InlineNote tone={deleteTarget.has_loan_history ? "warning" : "danger"}>
               {deleteTarget.has_loan_history
-                ? "This borrower has loan history, so this will DEACTIVATE them (soft delete) — they stay correct in their existing loan records but disappear from new-loan selection. This can be reversed later."
-                : "This borrower has no loan history, so this will be a PERMANENT deletion once approved — it cannot be undone."}
-              {" "}This proposal still needs a Checker's approval, same as an edit.
+                ? "This borrower has loan history, so this will DEACTIVATE them (soft delete) immediately — they stay correct in their existing loan records but disappear from new-loan selection. This can be reversed later."
+                : "This borrower has no loan history, so this will PERMANENTLY delete them immediately — it cannot be undone."}
+              {" "}Applies right away — no second person approves this first.
             </InlineNote>
             <Field label="Reason (optional)">
               <Input value={deleteReason} onChange={(e: any) => setDeleteReason(e.target.value)} />
             </Field>
             <div className="flex gap-2 pt-1">
               <Button variant="danger" disabled={deleteBusy} onClick={submitDelete} className="flex-1">
-                {deleteBusy ? "Proposing…" : deleteTarget.has_loan_history ? "Propose deactivation" : "Propose deletion"}
+                {deleteBusy ? "Working…" : deleteTarget.has_loan_history ? "Deactivate" : "Delete permanently"}
               </Button>
               <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
             </div>

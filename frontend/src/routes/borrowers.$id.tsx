@@ -163,8 +163,12 @@ function BorrowerDetail() {
           ) : null}
           {b.pending_request ? (
             <InlineNote tone="warning">
-              {b.pending_request.action === "edit" ? "An edit" : b.pending_request.action === "deactivate" ? "A deactivation" : "A deletion"} proposed by{" "}
-              {b.pending_request.created_by} is awaiting a Checker's approval. The details below are the CURRENT, unchanged record.
+              {/* Edits and deletes both apply immediately now — this can
+                  only ever be a LEGACY request, left over from before that
+                  change, with no new ones created going forward. It
+                  blocks nothing here; resolve it on the Approvals page. */}
+              A legacy {b.pending_request.action === "edit" ? "edit" : b.pending_request.action === "deactivate" ? "deactivation" : "deletion"} request proposed by{" "}
+              {b.pending_request.created_by} is still awaiting a Checker's decision from before edits/deletes stopped requiring approval.
             </InlineNote>
           ) : null}
         <div className="grid gap-4 xl:grid-cols-[1fr_1.4fr]">

@@ -619,9 +619,9 @@ export const borrowers = {
   async get(id) {
     return { data: toItem(await request(`${ENDPOINTS.borrowers}/${id}`), "borrower") };
   },
-  // Applied immediately — no approval step (deactivate/delete still are; see proposeDelete).
+  // Both applied immediately now — no approval step for either.
   update: (id, data) => request(`${ENDPOINTS.borrowers}/${id}`, { method: "PUT", body: data }),
-  proposeDelete: (id, reason) => request(`${ENDPOINTS.borrowers}/${id}/propose-delete`, { method: "POST", body: { reason } }),
+  remove: (id, reason) => request(`${ENDPOINTS.borrowers}/${id}/delete`, { method: "POST", body: { reason } }),
   reactivate: (id) => request(`${ENDPOINTS.borrowers}/${id}/reactivate`, { method: "POST", body: {} }),
   verifyId: (id) => request(`${ENDPOINTS.borrowers}/${id}/verify-id`, { method: "POST", body: {} }),
   upload(id, kind, file) {

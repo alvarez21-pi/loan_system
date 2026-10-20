@@ -433,16 +433,15 @@ def update_borrower(user, borrower_id):
     step (Grace's correction: unlike loans/penalties, a borrower edit is
     not routed through a Checker). The old/new value of every field
     actually changed is still written to the audit trail, same as before.
-    Still blocked while a deactivate/hard-delete request is pending on this
-    borrower (that part of the flow is unchanged — see propose_borrower_delete) —
-    editing a borrower that's about to be removed makes no sense.
+    Delete (delete_borrower, below) is now also immediate, so there is no
+    "pending" state left for either action to block on — a stale pending
+    row from before this change used to wrongly block an edit here with a
+    confusing error; removed rather than rescoped, since nothing creates a
+    new pending row any more for either action to actually conflict with.
 
     A loan already issued is never affected: its borrower_*_snapshot
     columns were captured once, at issuance, and are never touched here."""
     borrower = Borrower.query.get_or_404(borrower_id)
-    if BorrowerEditRequest.query.filter_by(borrower_id=borrower.id, status="pending").first():
-        return error("this borrower has a pending deactivate/delete request awaiting approval", 409)
-
     data = request.get_json(silent=True) or {}
     changes = {}
     try:
@@ -1559,45 +1558,52 @@ def approve_loan(user, record_id): return decide_record(user, Loan, record_id, "
 def reject_loan(user, record_id): return decide_record(user, Loan, record_id, "rejected", "loan")
 
 
-# ---------------------------------------------------------- borrower edit/delete (maker-checker)
+# ---------------------------------------------------------- borrower delete (direct, no approval)
+#
+# Edits (update_borrower, above) and delete (delete_borrower, below) both
+# apply immediately now — the maker-checker step that borrower_edit_requests
+# originally provided for BOTH is gone for both. The model, and the
+# approve/reject endpoints right under this comment, are kept ONLY so any
+# request that was already sitting 'pending' from before this change has
+# somewhere to be resolved (a Checker can still decide it on the Approvals
+# page) — nothing new is ever written to this table from this point on, by
+# either action.
 
 @operations_bp.get("/borrower-edit-requests")
 @permission_required("borrowers:manage", "borrowers:approve", any_of=True)
 def list_borrower_edit_requests(user):
     """Every request (any status) — the Approvals page filters to 'pending'
-    client-side, same pattern as loans/penalties/leave."""
+    client-side, same pattern as loans/penalties/leave. Only ever has rows
+    from before edit/delete stopped requiring approval; nothing creates a
+    new one any more."""
     rows = BorrowerEditRequest.query.order_by(BorrowerEditRequest.created_at.desc()).all()
     return jsonify({"borrower_edit_requests": [borrower_edit_request_json(r, user) for r in rows]})
 
 
-@operations_bp.post("/borrowers/<int:borrower_id>/propose-delete")
+@operations_bp.post("/borrowers/<int:borrower_id>/delete")
 @permission_required("borrowers:manage")
-def propose_borrower_delete(user, borrower_id):
-    """Delete (soft or hard) is a HIGHER-risk action than an edit, not a
-    lower one — it goes through the exact same maker-checker request, just
-    with action='deactivate' or 'hard_delete'. Which one is allowed is
-    decided here from the borrower's OWN loan history, not from anything
-    the client sends: any loan history at all -> soft delete only."""
+def delete_borrower(user, borrower_id):
+    """Delete (soft or hard) applies IMMEDIATELY — no approval step, same
+    correction as the edit flow above. Which one happens is still decided
+    here from the borrower's OWN loan history, not from anything the client
+    sends: any loan history at all -> soft delete (deactivate), never hard.
+    The audit trail is unchanged in thoroughness — who, what, when — the
+    only thing removed is the second person who used to have to agree
+    first."""
     borrower = Borrower.query.get_or_404(borrower_id)
     if not borrower.is_active:
         return error("this borrower is already deactivated", 409)
-    if BorrowerEditRequest.query.filter_by(borrower_id=borrower.id, status="pending").first():
-        return error("this borrower already has a pending edit or delete request awaiting approval", 409)
-    action = "deactivate" if borrower.has_loan_history else "hard_delete"
     data = request.get_json(silent=True) or {}
-    request_row = BorrowerEditRequest(
-        borrower_id=borrower.id, borrower_name_snapshot=borrower.name, action=action, changes={},
-        reason=data.get("reason"), created_by=user.id, creator_name_snapshot=user.name,
-    )
-    db.session.add(request_row)
-    try:
-        db.session.flush()
-    except IntegrityError:
-        db.session.rollback()
-        return error("this borrower already has a pending edit or delete request awaiting approval", 409)
-    audit(user, "PROPOSE_DELETE", "borrowers", borrower.id, details=f"action={action}; reason={data.get('reason') or '-'}")
+    reason = (data.get("reason") or "").strip() or None
+    if borrower.has_loan_history:
+        borrower.deactivate()
+        audit(user, "DEACTIVATE", "borrowers", borrower.id, details=reason)
+        db.session.commit()
+        return jsonify({"borrower": borrower_json(borrower)})
+    audit(user, "HARD_DELETE", "borrowers", borrower.id, details=reason)
+    db.session.delete(borrower)
     db.session.commit()
-    return jsonify({"borrower_edit_request": borrower_edit_request_json(request_row)}), 201
+    return jsonify({"message": "Borrower permanently deleted."})
 
 
 @operations_bp.post("/borrower-edit-requests/<int:record_id>/approve")

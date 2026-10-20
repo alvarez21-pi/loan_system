@@ -152,6 +152,42 @@ def test_fully_paid_never_fires_while_principal_is_still_owed(client, staff):
     assert final["loan"]["status"] == "closed"
 
 
+def test_early_paydown_regression_1m_at_10pct_3_months_verified_by_grace(client, staff):
+    """Grace manually verified this exact scenario on staging and asked
+    for it locked in as a named regression test rather than something that
+    just happened to work:
+
+    1,000,000 interest-only at 10%/month, 3-month term.
+      - Month 1: pay 120,000 (20,000 excess) -> balance drops to 980,000.
+      - Month 2's interest recalculates to 98,000 (980,000 x 10%).
+      - Month 2: pay 900,000 (802,000 excess, after that month's 98,000
+        interest) -> balance drops to 178,000.
+      - Month 3's interest recalculates to 17,800 (178,000 x 10%), and the
+        final payment closes the loan at exactly 0 balance.
+    """
+    _, headers = staff
+    loan_id = make_active_loan(client, headers, "regr1", principal=1_000_000, rate=10, term=3, loan_type="interest_only")
+
+    after_month1 = pay(client, headers, loan_id, 120_000, date="2026-02-15")
+    assert Decimal(str(after_month1["loan"]["outstanding_balance"])) == Decimal("980000")
+    assert after_month1["loan"]["status"] == "active"
+    loan = get_loan(client, headers, loan_id)
+    month2_row = open_rows(loan)[0]
+    assert Decimal(str(month2_row["interest_portion"])) == Decimal("98000")
+
+    after_month2 = pay(client, headers, loan_id, 900_000, date="2026-03-15")
+    assert Decimal(str(after_month2["loan"]["outstanding_balance"])) == Decimal("178000")
+    assert after_month2["loan"]["status"] == "active"
+    loan = get_loan(client, headers, loan_id)
+    month3_row = open_rows(loan)[0]
+    assert Decimal(str(month3_row["interest_portion"])) == Decimal("17800")
+    assert Decimal(str(month3_row["principal_portion"])) == Decimal("178000")
+
+    final = pay(client, headers, loan_id, 195_800, date="2026-04-15")
+    assert Decimal(str(final["loan"]["outstanding_balance"])) == Decimal("0")
+    assert final["loan"]["status"] == "closed"
+
+
 # --------------------------------------------------------------- 2. loan edit (no maker-checker)
 
 def test_loan_edit_applies_immediately_with_no_approval_step_and_is_audited(client, staff):
@@ -249,3 +285,51 @@ def test_a_checker_who_cannot_create_loans_also_cannot_edit_one(client, staff):
     loan_id = make_active_loan(client, headers, "e6", principal=200_000, rate=10, term=6)
     denied = client.put(f"/api/loans/{loan_id}", json={"interest_rate": 12}, headers=headers["checker"])
     assert denied.status_code == 403
+
+
+# --------------------------------------------------------------- 3. calculator shares the real schedule logic
+
+def test_calculator_preview_matches_a_real_reducing_balance_loan_exactly(client, staff):
+    _, headers = staff
+    loan_id = make_active_loan(client, headers, "calc1", principal=850_000, rate=12, term=9, loan_type="reducing_balance")
+    loan = get_loan(client, headers, loan_id)
+
+    preview = client.post("/api/loan-calculator/preview", json={
+        "principal": 850_000, "interest_rate": 12, "term_months": 9, "loan_type": "reducing_balance",
+        "start_date": loan["start_date"],
+    }, headers=headers["maker"])
+    assert preview.status_code == 200, preview.get_json()
+    preview_rows = preview.get_json()["schedule"]
+    real_rows = sorted(loan["schedules"], key=lambda r: r["due_date"])
+
+    assert len(preview_rows) == len(real_rows)
+    for p, r in zip(preview_rows, real_rows):
+        assert p["due_date"] == r["due_date"]
+        assert Decimal(str(p["principal_portion"])) == Decimal(str(r["principal_portion"]))
+        assert Decimal(str(p["interest_portion"])) == Decimal(str(r["interest_portion"]))
+        assert Decimal(str(p["payment_amount"])) == Decimal(str(r["expected_amount"]))
+
+
+def test_calculator_preview_matches_a_real_interest_only_loan_exactly(client, staff):
+    _, headers = staff
+    loan_id = make_active_loan(client, headers, "calc2", principal=450_000, rate=8, term=5, loan_type="interest_only")
+    loan = get_loan(client, headers, loan_id)
+
+    preview = client.post("/api/loan-calculator/preview", json={
+        "principal": 450_000, "interest_rate": 8, "term_months": 5, "loan_type": "interest_only",
+        "start_date": loan["start_date"],
+    }, headers=headers["maker"])
+    assert preview.status_code == 200, preview.get_json()
+    preview_rows = preview.get_json()["schedule"]
+    real_rows = sorted(loan["schedules"], key=lambda r: r["due_date"])
+
+    assert len(preview_rows) == len(real_rows) == 5
+    for p, r in zip(preview_rows, real_rows):
+        assert p["due_date"] == r["due_date"]
+        assert Decimal(str(p["principal_portion"])) == Decimal(str(r["principal_portion"]))
+        assert Decimal(str(p["interest_portion"])) == Decimal(str(r["interest_portion"]))
+        assert Decimal(str(p["payment_amount"])) == Decimal(str(r["expected_amount"]))
+    # The shape item 8 asks to confirm explicitly: interest-only installments
+    # for months 1..N-1, the lump-sum principal landing only on the last.
+    assert all(Decimal(str(row["principal_portion"])) == Decimal("0") for row in preview_rows[:-1])
+    assert Decimal(str(preview_rows[-1]["principal_portion"])) == Decimal("450000")
