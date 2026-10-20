@@ -50,7 +50,13 @@ const EMPTY = {
   interest_rate: "",
   term_months: "",
   start_date: "",
+  loan_type: "reducing_balance",
 };
+
+const LOAN_TYPES = [
+  { value: "reducing_balance", label: "Reducing balance (EMI)" },
+  { value: "interest_only", label: "Interest-only (lump sum principal at the end)" },
+];
 
 const PENDING = /pending|submitted|awaiting|review/i;
 const isPending = (row: any) => PENDING.test(String(row.status || ""));
@@ -118,7 +124,7 @@ function LoansPage() {
     const handle = setTimeout(() => {
       calculator
         .preview({
-          principal, interest_rate: Number(rate), term_months: term, interest_type: "reducing_balance",
+          principal, interest_rate: Number(rate), term_months: term, loan_type: form.loan_type,
           start_date: form.start_date || undefined,
         })
         .then((result) => {
@@ -133,7 +139,7 @@ function LoansPage() {
     }, 400);
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.principal_amount, form.interest_rate, form.term_months, form.start_date]);
+  }, [form.principal_amount, form.interest_rate, form.term_months, form.start_date, form.loan_type]);
 
   function validate() {
     const next: Record<string, string> = {};
@@ -176,6 +182,7 @@ function LoansPage() {
         interest_rate: Number(form.interest_rate),
         term_months: Number(form.term_months),
         start_date: form.start_date,
+        loan_type: form.loan_type,
       });
       setForm(EMPTY);
       setPreview(null);
@@ -284,6 +291,7 @@ function LoansPage() {
                 },
                 { key: "borrower_name", label: "Borrower", sortKey: "borrower_name", render: (r: any) => r.borrower_name || r.borrower?.name || "—" },
                 { key: "product_name", label: "Product", render: (r: any) => r.product_name || r.loan_product?.name || "Negotiated rate" },
+                { key: "loan_type", label: "Type", render: (r: any) => (r.loan_type === "interest_only" ? "Interest-only" : "Reducing balance") },
                 { key: "principal_amount", label: "Principal", render: (r: any) => money(r.principal_amount) },
                 { key: "interest_rate", label: "Monthly Rate (%)", render: (r: any) => percent(r.interest_rate) },
                 { key: "term_months", label: "Term (months)", render: (r: any) => fmtNumber(r.term_months) },
@@ -340,6 +348,13 @@ function LoansPage() {
                     <option key={p.id} value={p.id}>
                       {p.name}
                     </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="Loan type" name="loan_type">
+                <Select value={form.loan_type} onChange={(e: any) => set("loan_type", e.target.value)}>
+                  {LOAN_TYPES.map((t) => (
+                    <option key={t.value} value={t.value}>{t.label}</option>
                   ))}
                 </Select>
               </Field>

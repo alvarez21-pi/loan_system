@@ -1,13 +1,17 @@
 """Borrower edit/delete/reactivate/notes — the staging test plan from the
-client-feedback request, as automated tests: every borrower change now
-routes through the SAME maker-checker approval model loans already use
-(models/borrower.py's BorrowerEditRequest, services/approval.py unchanged),
-loan documents snapshot the borrower at issuance, deletion is soft when
-there's loan history, hard only when there is none, duplicate ID/phone is a
-warning not a block, ID is optional at creation and never blocks loan
-issuance (a borrower with no ID is just flagged id_pending — the notes
-feature is how staff record why), and notes are an append-only authored
-log."""
+client-feedback request, as automated tests.
+
+An EDIT applies IMMEDIATELY (Grace's correction: unlike loans/penalties, a
+borrower edit is not routed through a Checker) — the audit trail still
+records the old/new value of every field changed. Delete (soft or hard)
+still goes through the SAME maker-checker approval model loans use
+(models/borrower.py's BorrowerEditRequest, services/approval.py unchanged)
+— that part was not changed. Loan documents snapshot the borrower at
+issuance, deletion is soft when there's loan history, hard only when there
+is none, duplicate ID/phone is a warning not a block, ID is optional at
+creation and never blocks loan issuance (a borrower with no ID is just
+flagged id_pending — the notes feature is how staff record why), and notes
+are an append-only authored log."""
 import pytest
 
 from models import AuditLog
@@ -56,26 +60,19 @@ def make_loan_for(client, headers, borrower_id, tag="L"):
 
 # --------------------------------------------------------------- 1. edit + snapshot
 
-def test_edit_does_not_apply_live_and_issued_loan_keeps_its_original_snapshot(client, staff):
+def test_edit_applies_immediately_and_issued_loan_keeps_its_original_snapshot(client, staff):
     _, headers = staff
     borrower = make_borrower(client, headers, tag="e1")
     loan = make_loan_for(client, headers, borrower["id"], tag="e1")
     assert loan["borrower_name_snapshot"] == borrower["name"]
 
-    propose = client.put(
+    edited = client.put(
         f"/api/borrowers/{borrower['id']}", json={"name": "Renamed Borrower"}, headers=headers["maker"],
     )
-    assert propose.status_code == 201, propose.get_json()
-    request_id = propose.get_json()["borrower_edit_request"]["id"]
+    assert edited.status_code == 200, edited.get_json()
+    assert edited.get_json()["borrower"]["name"] == "Renamed Borrower"
 
-    # Live record is UNCHANGED while pending.
-    still = client.get(f"/api/borrowers/{borrower['id']}", headers=headers["maker"]).get_json()["borrower"]
-    assert still["name"] == borrower["name"]
-    assert still["pending_request"]["id"] == request_id
-
-    approve = client.post(f"/api/borrower-edit-requests/{request_id}/approve", headers=headers["checker"])
-    assert approve.status_code == 200, approve.get_json()
-
+    # No approval step at all — the live record changed right away.
     updated = client.get(f"/api/borrowers/{borrower['id']}", headers=headers["maker"]).get_json()["borrower"]
     assert updated["name"] == "Renamed Borrower"
     assert updated["pending_request"] is None
@@ -86,33 +83,45 @@ def test_edit_does_not_apply_live_and_issued_loan_keeps_its_original_snapshot(cl
     assert loan_after["borrower_name_snapshot"] == borrower["name"]
     assert loan_after["borrower_name_snapshot"] != "Renamed Borrower"
 
-    audited = AuditLog.query.filter_by(table_name="borrower_edit_request", action="APPROVED").first()
+    audited = AuditLog.query.filter_by(table_name="borrowers", record_id=borrower["id"], action="EDIT").first()
     assert audited is not None and "Renamed Borrower" in audited.details
 
 
 def test_edit_on_borrower_with_no_loan_history(client, staff):
     _, headers = staff
     borrower = make_borrower(client, headers, tag="e2")
-    propose = client.put(f"/api/borrowers/{borrower['id']}", json={"phone": "0799000111"}, headers=headers["maker"])
-    assert propose.status_code == 201
-    request_id = propose.get_json()["borrower_edit_request"]["id"]
-    approve = client.post(f"/api/borrower-edit-requests/{request_id}/approve", headers=headers["checker"])
-    assert approve.status_code == 200
+    edited = client.put(f"/api/borrowers/{borrower['id']}", json={"phone": "0799000111"}, headers=headers["maker"])
+    assert edited.status_code == 200
+    assert edited.get_json()["borrower"]["phone"] == "0799000111"
     updated = client.get(f"/api/borrowers/{borrower['id']}", headers=headers["maker"]).get_json()["borrower"]
     assert updated["phone"] == "0799000111"
 
 
-def test_second_pending_edit_on_the_same_borrower_is_blocked(client, staff):
+def test_two_sequential_edits_both_apply_immediately_no_approval_queue(client, staff):
+    """There is no 'pending edit' state any more — a second edit right
+    after the first is never blocked (contrast with delete, below, which
+    still queues for approval)."""
     _, headers = staff
     borrower = make_borrower(client, headers, tag="e3")
     first = client.put(f"/api/borrowers/{borrower['id']}", json={"phone": "0799000222"}, headers=headers["maker"])
-    assert first.status_code == 201
+    assert first.status_code == 200
     second = client.put(f"/api/borrowers/{borrower['id']}", json={"phone": "0799000333"}, headers=headers["maker"])
-    assert second.status_code == 409
-    assert "pending" in second.get_json()["message"].lower()
+    assert second.status_code == 200
+    updated = client.get(f"/api/borrowers/{borrower['id']}", headers=headers["maker"]).get_json()["borrower"]
+    assert updated["phone"] == "0799000333"
 
 
-# --------------------------------------------------------------- 2. delete
+def test_edit_is_blocked_while_a_delete_request_is_pending(client, staff):
+    _, headers = staff
+    borrower = make_borrower(client, headers, tag="e4")
+    propose = client.post(f"/api/borrowers/{borrower['id']}/propose-delete", json={}, headers=headers["maker"])
+    assert propose.status_code == 201, propose.get_json()
+    blocked = client.put(f"/api/borrowers/{borrower['id']}", json={"phone": "0799000444"}, headers=headers["maker"])
+    assert blocked.status_code == 409
+    assert "pending" in blocked.get_json()["message"].lower()
+
+
+# --------------------------------------------------------------- 2. delete (still maker-checker)
 
 def test_delete_borrower_with_loan_history_soft_deletes_and_keeps_loan_history_correct(client, staff):
     _, headers = staff
@@ -190,14 +199,13 @@ def test_create_with_duplicate_phone_warns_but_does_not_block(client, staff):
 def test_edit_without_changing_id_or_phone_does_not_flag_itself_as_a_duplicate(client, staff):
     _, headers = staff
     borrower = make_borrower(client, headers, tag="p2", phone="0788333444")
-    propose = client.put(
+    edited = client.put(
         f"/api/borrowers/{borrower['id']}", json={"phone": "0788333444", "name": "Same Phone Edit"}, headers=headers["maker"],
     )
-    assert propose.status_code == 201
-    # "phone" didn't actually change, so it's not in the diff, so no self-match.
-    assert "duplicate_warning" not in propose.get_json()
-    assert "phone" not in propose.get_json()["borrower_edit_request"]["changes"]
-    assert propose.get_json()["borrower_edit_request"]["changes"]["name"]["new"] == "Same Phone Edit"
+    assert edited.status_code == 200
+    # "phone" didn't actually change, so no self-match warning.
+    assert "duplicate_warning" not in edited.get_json()
+    assert edited.get_json()["borrower"]["name"] == "Same Phone Edit"
 
 
 # --------------------------------------------------------------- 4. optional ID
@@ -255,14 +263,18 @@ def test_notes_are_timestamped_authored_and_never_overwritten(client, staff):
         assert n["created_at"]
 
 
-# --------------------------------------------------------------- 6. maker-checker rule preserved
+# --------------------------------------------------------------- 6. maker-checker rule preserved (delete only)
 
-def test_maker_checker_self_approval_rules_carry_over_to_borrower_edits(client, staff):
+def test_maker_checker_self_approval_rules_carry_over_to_borrower_delete(client, staff):
+    """Edits no longer go through approval at all, so there is no
+    self-approval question left to ask about them — but delete still does,
+    and the same rule set (never maker/checker, CEO/Head Manager/Dept
+    Manager exempt) must still hold there."""
     _, headers = staff
     borrower = make_borrower(client, headers, tag="s1")
 
-    # A checker who PROPOSED their own edit cannot approve it (never exempt).
-    propose = client.put(f"/api/borrowers/{borrower['id']}", json={"phone": "0711999000"}, headers=headers["checker"])
+    # A checker who PROPOSED their own delete cannot approve it (never exempt).
+    propose = client.post(f"/api/borrowers/{borrower['id']}/propose-delete", json={}, headers=headers["checker"])
     req = propose.get_json()["borrower_edit_request"]
     self_approve = client.post(f"/api/borrower-edit-requests/{req['id']}/approve", headers=headers["checker"])
     assert self_approve.status_code == 403
@@ -273,14 +285,14 @@ def test_maker_checker_self_approval_rules_carry_over_to_borrower_edits(client, 
 
     # A maker never gets to approve at all, even someone else's.
     borrower2 = make_borrower(client, headers, tag="s2")
-    propose2 = client.put(f"/api/borrowers/{borrower2['id']}", json={"phone": "0711999111"}, headers=headers["maker"])
+    propose2 = client.post(f"/api/borrowers/{borrower2['id']}/propose-delete", json={}, headers=headers["maker"])
     req2 = propose2.get_json()["borrower_edit_request"]
     maker_tries = client.post(f"/api/borrower-edit-requests/{req2['id']}/approve", headers=headers["maker"])
     assert maker_tries.status_code == 403
 
     # CEO is exempt from self-approval (same rule as loans).
     borrower3 = make_borrower(client, headers, tag="s3")
-    propose3 = client.put(f"/api/borrowers/{borrower3['id']}", json={"phone": "0711999222"}, headers=headers["ceo"])
+    propose3 = client.post(f"/api/borrowers/{borrower3['id']}/propose-delete", json={}, headers=headers["ceo"])
     req3 = propose3.get_json()["borrower_edit_request"]
     ceo_self_approve = client.post(f"/api/borrower-edit-requests/{req3['id']}/approve", headers=headers["ceo"])
     assert ceo_self_approve.status_code == 200, ceo_self_approve.get_json()
@@ -288,24 +300,15 @@ def test_maker_checker_self_approval_rules_carry_over_to_borrower_edits(client, 
 
 # --------------------------------------------------------------- 7. audit trail
 
-def test_audit_log_captures_propose_approve_delete_reactivate_and_notes(client, staff):
+def test_audit_log_captures_edit_delete_reactivate_and_notes(client, staff):
     _, headers = staff
-    # A separate borrower per action — NOT because the system can't handle
-    # several approved requests over one borrower's lifetime (Postgres's
-    # partial unique index, migration 20261022_0030, only ever blocks a
-    # SECOND *pending* one — see test_second_pending_edit_on_the_same_
-    # borrower_is_blocked for that), but because sqlite (this test's DB)
-    # can't express a partial/filtered unique index and falls back to a
-    # plain one across the whole column, which this test's own path through
-    # the API would otherwise trip over a false positive.
     edited = make_borrower(client, headers, tag="a1")
     deleted = make_borrower(client, headers, tag="a2")
     make_loan_for(client, headers, deleted["id"], tag="a2")  # has_loan_history -> soft delete, so REACTIVATE is reachable below
 
     client.post(f"/api/borrowers/{edited['id']}/notes", json={"text": "flagged for review"}, headers=headers["maker"])
-    propose = client.put(f"/api/borrowers/{edited['id']}", json={"phone": "0722000000"}, headers=headers["maker"])
-    req = propose.get_json()["borrower_edit_request"]
-    client.post(f"/api/borrower-edit-requests/{req['id']}/approve", headers=headers["checker"])
+    edit_resp = client.put(f"/api/borrowers/{edited['id']}", json={"phone": "0722000000"}, headers=headers["maker"])
+    assert edit_resp.status_code == 200, edit_resp.get_json()
 
     propose_del = client.post(f"/api/borrowers/{deleted['id']}/propose-delete", json={"reason": "test"}, headers=headers["maker"])
     del_req = propose_del.get_json()["borrower_edit_request"]
@@ -318,15 +321,15 @@ def test_audit_log_captures_propose_approve_delete_reactivate_and_notes(client, 
             AuditLog.table_name == "borrowers", AuditLog.record_id.in_([edited["id"], deleted["id"]]),
         ).all()
     }
-    assert {"CREATE", "ADD_NOTE", "PROPOSE_EDIT", "PROPOSE_DELETE", "REACTIVATE"}.issubset(borrower_actions)
-    # The actual decisions (approving the edit, then the delete) are filed
-    # under the request they decided, not the borrower directly — same
-    # separation loans/penalties already have between the record itself and
-    # its own approve/reject trail.
+    # EDIT is applied and logged directly against the borrower now (no more
+    # PROPOSE_EDIT/APPROVED pair) — PROPOSE_DELETE/REACTIVATE are unchanged.
+    assert {"CREATE", "ADD_NOTE", "EDIT", "PROPOSE_DELETE", "REACTIVATE"}.issubset(borrower_actions)
+    # The delete DECISION is still filed under the request it decided, not
+    # the borrower directly — same separation loans/penalties already have.
     request_actions = {
         log.action
         for log in AuditLog.query.filter_by(table_name="borrower_edit_request").all()
-        if log.record_id in (req["id"], del_req["id"])
+        if log.record_id == del_req["id"]
     }
     assert request_actions == {"APPROVED"}
     for log in AuditLog.query.filter(

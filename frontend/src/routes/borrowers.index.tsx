@@ -70,9 +70,9 @@ function BorrowersPage() {
   const [duplicate, setDuplicate] = useState<any>(null);
   const [busy, setBusy] = useState(false);
 
-  // The edit form PROPOSES a change (maker-checker, same as a loan) — it
-  // never writes to the borrower directly. editForm holds the pending
-  // field values; editTarget is the borrower it's proposed against.
+  // The edit form writes directly — no approval step for a borrower edit.
+  // editForm holds the in-progress field values; editTarget is the
+  // borrower being edited.
   const [editTarget, setEditTarget] = useState<any>(null);
   const [editForm, setEditForm] = useState<any>(null);
   const [editBusy, setEditBusy] = useState(false);
@@ -94,11 +94,11 @@ function BorrowersPage() {
     if (!editTarget || !editForm) return;
     setEditBusy(true);
     try {
-      const result: any = await borrowers.proposeEdit(editTarget.id, editForm);
-      if (result?.message === "No changes to propose.") {
-        showToast("No changes to propose.", "info");
+      const result: any = await borrowers.update(editTarget.id, editForm);
+      if (result?.message === "No changes to apply.") {
+        showToast("No changes to apply.", "info");
       } else {
-        showToast("Edit proposed — it will apply once a Checker approves it.", "success");
+        showToast("Borrower updated.", "success");
         if (result?.duplicate_warning) {
           setDuplicate(result.duplicate_warning);
           showToast(result.duplicate_warning.message, "warning");
@@ -388,7 +388,7 @@ function BorrowersPage() {
       </div>
 
       {editTarget && editForm ? (
-        <Modal title={`Propose an edit — ${editTarget.name}`} description="Applies only once a Checker approves it." onClose={() => setEditTarget(null)} size="sm">
+        <Modal title={`Edit — ${editTarget.name}`} description="Applies immediately." onClose={() => setEditTarget(null)} size="sm">
           <form onSubmit={submitEdit} className="space-y-3" noValidate>
             <Field label="Full name">
               <Input value={editForm.name} onChange={(e: any) => setEditForm({ ...editForm, name: e.target.value })} />
@@ -413,7 +413,7 @@ function BorrowersPage() {
               <Input value={editForm.address} onChange={(e: any) => setEditForm({ ...editForm, address: e.target.value })} />
             </Field>
             <div className="flex gap-2 pt-1">
-              <Button type="submit" disabled={editBusy} className="flex-1">{editBusy ? "Proposing…" : "Propose edit"}</Button>
+              <Button type="submit" disabled={editBusy} className="flex-1">{editBusy ? "Saving…" : "Save"}</Button>
               <Button type="button" variant="outline" onClick={() => setEditTarget(null)}>Cancel</Button>
             </div>
           </form>

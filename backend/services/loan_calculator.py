@@ -148,6 +148,69 @@ def amortization_schedule(principal, interest_rate, term_months, start_date=None
     return schedule
 
 
+def interest_only_schedule(principal, interest_rate, term_months, start_date=None, step=DEFAULT_ROUNDING_STEP):
+    """Interest-only schedule: months 1..N-1 are interest on the current
+    outstanding principal (which does not reduce in this phase, except via
+    an extra payment handled elsewhere in apply_repayment() — never here);
+    month N (the natural final period) is that month's interest PLUS the
+    full remaining principal, exactly like amortization_schedule()'s own
+    final-period close-out.
+
+    `step` is accepted only so every call site can treat this the same as
+    amortization_schedule() (same signature) — it is never applied here.
+    There is no separately-computed EMI to round to a step: the scheduled
+    instalment IS the period's own interest, and rounding it up would make
+    the "scheduled" amount exceed interest actually due, silently turning
+    an on-time, exact payment into an overpayment that nibbles principal
+    every month — the opposite of "principal only moves on a real extra
+    payment". Interest itself still only ever rounds UP to the whole
+    shilling (`whole_up`), same as every other interest figure in this
+    system.
+    """
+    principal = money(principal)
+    monthly_percent = Decimal(str(interest_rate))
+    term_months = int(term_months)
+    if principal <= 0 or term_months <= 0 or monthly_percent < 0:
+        raise ValueError("principal, interest_rate, and term_months are invalid")
+
+    monthly_rate = monthly_percent / HUNDRED
+    balance = principal
+    schedule = []
+    for period in range(1, term_months + 1):
+        interest = whole_up(balance * monthly_rate)
+        if period == term_months:
+            principal_portion = balance
+            payment_amount = balance + interest
+            balance = Decimal(0)
+        else:
+            principal_portion = Decimal(0)
+            payment_amount = interest
+        schedule.append(
+            {
+                "period": period,
+                "due_date_offset_months": period,
+                "due_date": add_months(start_date, period) if start_date else None,
+                "principal_portion": principal_portion,
+                "interest_portion": interest,
+                "payment_amount": payment_amount,
+                "balance_after": balance,
+            }
+        )
+    return schedule
+
+
+LOAN_TYPES = ("reducing_balance", "interest_only")
+
+
+def build_loan_schedule(loan_type, principal, interest_rate, term_months, start_date=None, step=DEFAULT_ROUNDING_STEP):
+    """The one dispatch point every caller uses instead of choosing between
+    amortization_schedule()/interest_only_schedule() itself — so a new loan
+    type only ever needs to be wired in here."""
+    if loan_type == "interest_only":
+        return interest_only_schedule(principal, interest_rate, term_months, start_date, step=step)
+    return amortization_schedule(principal, interest_rate, term_months, start_date, step=step)
+
+
 def schedule_totals(triples):
     """(principal_portion, interest_portion, payment_amount) triples -> the one
     totals computation shared by the calculator, loan-creation preview, loan

@@ -197,7 +197,11 @@ def schedule_pdf(loan):
                     loan.borrower_name_snapshot or (loan.borrower.name if loan.borrower else "-"),
                     "Principal", fmt_money(loan.principal_amount),
                 ],
-                ["Product", loan.loan_product.name if loan.loan_product else "-", "Monthly Interest Rate", f"{loan.interest_rate}% per month (reducing balance)"],
+                [
+                    "Product", loan.loan_product.name if loan.loan_product else "-",
+                    "Monthly Interest Rate",
+                    f"{loan.interest_rate}% per month ({'interest-only' if loan.loan_type == 'interest_only' else 'reducing balance'})",
+                ],
                 ["Start date", loan.start_date.isoformat(), "Term", f"{loan.term_months} months"],
                 ["Status", str(loan.status).replace("_", " ").title(), "Outstanding balance", fmt_money(loan.outstanding_balance)],
             ],

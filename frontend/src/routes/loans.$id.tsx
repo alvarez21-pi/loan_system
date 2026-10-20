@@ -6,8 +6,13 @@ import {
   Button,
   Card,
   DataTable,
+  Field,
   InlineNote,
+  Modal,
+  MoneyInput,
+  NumberInput,
   PageHeader,
+  Select,
   StatusBadge,
   fmtNumber,
   money,
@@ -43,9 +48,44 @@ function LoanDetail() {
 
   const [downloading, setDownloading] = useState(false);
   const [deciding, setDeciding] = useState("");
+  const [editForm, setEditForm] = useState<any>(null);
+  const [editBusy, setEditBusy] = useState(false);
 
   // Only against a loan that is live, and only for a user with repayments:record.
   const canRecordRepayment = hasPermission(user, "repayments:record") && loan?.status === "active";
+  // Edits apply immediately, no approval step — allowed even once a loan is
+  // active/disbursed; only a closed or rejected loan has nothing left to edit.
+  const canEdit = hasPermission(user, "loans:create") && loan && !["closed", "rejected"].includes(loan.status);
+
+  function openEdit() {
+    setEditForm({
+      principal_amount: String(loan.principal_amount),
+      interest_rate: String(loan.interest_rate),
+      term_months: String(loan.term_months),
+      loan_type: loan.loan_type || "reducing_balance",
+    });
+  }
+
+  async function submitEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editForm) return;
+    setEditBusy(true);
+    try {
+      await loans.update(loan.id, {
+        principal_amount: Number(editForm.principal_amount),
+        interest_rate: Number(editForm.interest_rate),
+        term_months: Number(editForm.term_months),
+        loan_type: editForm.loan_type,
+      });
+      showToast("Loan updated. The remaining schedule was recalculated; past repayments are unchanged.", "success");
+      setEditForm(null);
+      detail.reload();
+    } catch (error) {
+      showToast(errorMessage(error), "danger");
+    } finally {
+      setEditBusy(false);
+    }
+  }
 
   // Balance after each instalment, derived from the schedule itself: the
   // principal still to be repaid by the instalments that follow it.
@@ -149,6 +189,7 @@ function LoanDetail() {
                   </Link>
                 ) : loan.borrower_name],
                 ["Product", loan.product_name || "Negotiated rate"],
+                ["Loan type", loan.loan_type === "interest_only" ? "Interest-only" : "Reducing balance"],
                 ["Status", <StatusBadge key="status" status={loan.status} reason={loan.rejection_reason} />],
                 ["Principal", money(loan.principal_amount)],
                 ["Monthly Interest Rate", `${percent(loan.interest_rate)} per month`],
@@ -186,6 +227,11 @@ function LoanDetail() {
                     Reject loan
                   </Button>
                 </>
+              ) : null}
+              {canEdit ? (
+                <Button variant="outline" onClick={openEdit}>
+                  Edit loan
+                </Button>
               ) : null}
             </div>
           </Card>
@@ -308,6 +354,32 @@ function LoanDetail() {
               </Card>
             ) : null}
           </div>
+
+          {editForm ? (
+            <Modal title={`Edit loan #${loan.id}`} description="Applies immediately. Past repayments are never altered — only the remaining, not-yet-paid schedule is recalculated on the new terms." onClose={() => setEditForm(null)} size="sm">
+              <form onSubmit={submitEdit} className="space-y-3" noValidate>
+                <Field label="Loan type">
+                  <Select value={editForm.loan_type} onChange={(e: any) => setEditForm({ ...editForm, loan_type: e.target.value })}>
+                    <option value="reducing_balance">Reducing balance (EMI)</option>
+                    <option value="interest_only">Interest-only (lump sum principal at the end)</option>
+                  </Select>
+                </Field>
+                <Field label="Principal amount">
+                  <MoneyInput value={editForm.principal_amount} onValueChange={(v) => setEditForm({ ...editForm, principal_amount: v })} />
+                </Field>
+                <Field label="Monthly Interest Rate (%)">
+                  <NumberInput decimals={2} value={editForm.interest_rate} onValueChange={(v) => setEditForm({ ...editForm, interest_rate: v })} />
+                </Field>
+                <Field label="Term (months)">
+                  <NumberInput integer value={editForm.term_months} onValueChange={(v) => setEditForm({ ...editForm, term_months: v })} />
+                </Field>
+                <div className="flex gap-2 pt-1">
+                  <Button type="submit" disabled={editBusy} className="flex-1">{editBusy ? "Saving…" : "Save"}</Button>
+                  <Button type="button" variant="outline" onClick={() => setEditForm(null)}>Cancel</Button>
+                </div>
+              </form>
+            </Modal>
+          ) : null}
 
           {(loan.penalties || []).length ? (
             <Card title="Penalties on this loan">

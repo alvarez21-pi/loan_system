@@ -71,6 +71,12 @@ class Loan(db.Model):
     # per-period EMI rate. Never an annual rate; nothing divides it by 12.
     interest_rate = db.Column(db.Numeric(*RATE), nullable=False, comment="Monthly interest rate in percent (10 = 10% per month)")
     term_months = db.Column(db.Integer, nullable=False)
+    # 'reducing_balance' (EMI, the original/default) or 'interest_only'
+    # (interest-only instalments, full remaining principal due as a lump
+    # sum in the final month). Drives which services.loan_calculator
+    # generator build_schedules()/apply_repayment()/reamortization use for
+    # this loan's schedule — see services.loan_calculator.build_loan_schedule().
+    loan_type = db.Column(db.String(20), nullable=False, default="reducing_balance", server_default="reducing_balance")
     # The instalment-rounding step this loan was created with (Part 1.2) —
     # copied from the company setting AT CREATION TIME and used for every
     # later recalculation on this loan. Changing the company setting later
@@ -106,6 +112,10 @@ class Loan(db.Model):
             "'closed', 'rejected'"
             ")",
             name="ck_loans_status",
+        ),
+        db.CheckConstraint(
+            "loan_type IN ('reducing_balance', 'interest_only')",
+            name="ck_loans_loan_type",
         ),
     )
     __mapper_args__ = {"version_id_col": lock_version}

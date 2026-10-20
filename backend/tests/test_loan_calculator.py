@@ -2,6 +2,8 @@ from decimal import Decimal
 
 from services.loan_calculator import (
     amortization_schedule,
+    build_loan_schedule,
+    interest_only_schedule,
     money,
     round_up_to_step,
     totals,
@@ -155,3 +157,43 @@ def test_a_small_loan_whose_balance_clears_early_ends_the_schedule_at_that_row()
     schedule = amortization_schedule("500", "10", 3, step=1000)
     assert len(schedule) == 1
     assert schedule[0]["balance_after"] == Decimal("0")
+
+
+# --------------------------------------------------------------- interest-only loan type
+
+def test_interest_only_schedule_never_reduces_principal_except_the_final_row():
+    schedule = interest_only_schedule("1200000", "10", 12)
+    assert len(schedule) == 12
+    for row in schedule[:-1]:
+        assert row["principal_portion"] == Decimal("0")
+        assert row["balance_after"] == Decimal("1200000")
+        # Interest-only: the monthly interest never changes, since the
+        # outstanding balance it's computed on never moves in this phase.
+        assert row["interest_portion"] == Decimal("120000")
+        assert row["payment_amount"] == row["interest_portion"]
+    final = schedule[-1]
+    assert final["principal_portion"] == Decimal("1200000")
+    assert final["interest_portion"] == Decimal("120000")
+    assert final["payment_amount"] == Decimal("1320000")
+    assert final["balance_after"] == Decimal("0")
+
+
+def test_interest_only_single_month_term_is_immediately_the_final_lump_sum():
+    schedule = interest_only_schedule("500000", "10", 1)
+    assert len(schedule) == 1
+    assert schedule[0]["principal_portion"] == Decimal("500000")
+    assert schedule[0]["balance_after"] == Decimal("0")
+
+
+def test_interest_only_step_is_accepted_but_never_applied():
+    # No separately-computed EMI to round up to a step here — the
+    # scheduled amount IS the period's own interest; step is accepted only
+    # for call-site symmetry with amortization_schedule().
+    with_step = interest_only_schedule("1200000", "10", 3, step=50000)
+    without_step = interest_only_schedule("1200000", "10", 3, step=1)
+    assert with_step == without_step
+
+
+def test_build_loan_schedule_dispatches_on_loan_type():
+    assert build_loan_schedule("interest_only", "1200000", "10", 12) == interest_only_schedule("1200000", "10", 12)
+    assert build_loan_schedule("reducing_balance", "1200000", "10", 12) == amortization_schedule("1200000", "10", 12)

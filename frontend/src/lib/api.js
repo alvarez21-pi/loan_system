@@ -619,10 +619,8 @@ export const borrowers = {
   async get(id) {
     return { data: toItem(await request(`${ENDPOINTS.borrowers}/${id}`), "borrower") };
   },
-  // Same endpoint as before, but no longer a live edit: this now PROPOSES
-  // the change (a pending borrower_edit_request) — the live record only
-  // changes once a Checker (or an eligible self-approver) approves it.
-  proposeEdit: (id, data) => request(`${ENDPOINTS.borrowers}/${id}`, { method: "PUT", body: data }),
+  // Applied immediately — no approval step (deactivate/delete still are; see proposeDelete).
+  update: (id, data) => request(`${ENDPOINTS.borrowers}/${id}`, { method: "PUT", body: data }),
   proposeDelete: (id, reason) => request(`${ENDPOINTS.borrowers}/${id}/propose-delete`, { method: "POST", body: { reason } }),
   reactivate: (id) => request(`${ENDPOINTS.borrowers}/${id}/reactivate`, { method: "POST", body: {} }),
   verifyId: (id) => request(`${ENDPOINTS.borrowers}/${id}/verify-id`, { method: "POST", body: {} }),
@@ -658,6 +656,8 @@ export const loanProducts = {
 export const loans = {
   list: (params) => (params ? paginatedList(ENDPOINTS.loans, "loans", params) : list(ENDPOINTS.loans, "loans")),
   create: (data) => request(ENDPOINTS.loans, { method: "POST", body: data }),
+  // Applied immediately — no approval step, even on an already-active loan.
+  update: (id, data) => request(`${ENDPOINTS.loans}/${id}`, { method: "PUT", body: data }),
   async get(id) {
     return { data: toItem(await request(`${ENDPOINTS.loans}/${id}`), "loan") };
   },

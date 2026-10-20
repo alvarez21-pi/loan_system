@@ -30,7 +30,15 @@ from routes.auth import auth_required
 from services.accounts import send_email_async
 from services.approval import NOT_AN_APPROVER, OUT_OF_SCOPE, SELF_APPROVAL, approval_denial
 from services.identity_verification import is_configured, normalize_nida, verify_nin
-from services.loan_calculator import add_months, amortization_schedule, local_today, money, schedule_totals, whole_up
+from services.loan_calculator import (
+    LOAN_TYPES,
+    add_months,
+    build_loan_schedule,
+    local_today,
+    money,
+    schedule_totals,
+    whole_up,
+)
 from services.pdf import schedule_pdf
 from services.permissions import has_permission
 
@@ -148,7 +156,8 @@ def company_rounding_step():
 
 
 def build_schedules(loan, start_date=None, principal=None, term=None):
-    rows = amortization_schedule(
+    rows = build_loan_schedule(
+        loan.loan_type,
         principal if principal is not None else loan.principal_amount,
         loan.interest_rate,
         term if term is not None else loan.term_months,
@@ -176,14 +185,15 @@ def build_schedules(loan, start_date=None, principal=None, term=None):
 @permission_required("calculator:use")
 def calculator_preview(_user):
     data = request.get_json(silent=True) or {}
-    if data.get("interest_type", "reducing_balance") != "reducing_balance":
-        return error("only reducing_balance is supported")
+    loan_type = data.get("loan_type") or data.get("interest_type") or "reducing_balance"
+    if loan_type not in LOAN_TYPES:
+        return error(f"loan_type must be one of: {', '.join(LOAN_TYPES)}")
     try:
         # A start date for the preview too (Part 3) - defaults to today so a
         # due-date column can be shown without forcing the user to pick one.
         start_date = parse_date(data["start_date"], "start_date") if data.get("start_date") else local_today()
         step = int(data["rounding_step"]) if data.get("rounding_step") else company_rounding_step()
-        schedule = amortization_schedule(data["principal"], data["interest_rate"], data["term_months"], start_date, step=step)
+        schedule = build_loan_schedule(loan_type, data["principal"], data["interest_rate"], data["term_months"], start_date, step=step)
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         return error(str(exc))
     # Same shared computation the loan detail page, schedule PDF and borrower
@@ -418,17 +428,20 @@ def create_borrower(user):
 
 @operations_bp.put("/borrowers/<int:borrower_id>")
 @permission_required("borrowers:manage")
-def propose_borrower_edit(user, borrower_id):
-    """An edit is PROPOSED, never applied live — the same maker-checker
-    control loans already have (services/approval.py), extended to
-    borrowers. The live Borrower row is untouched until a Checker (or an
-    eligible self-approver — see approval_denial()) approves the pending
-    borrower_edit_requests row this creates. At most one pending request
-    per borrower at a time (checked here; the partial unique index in the
-    migration is the race-proof backstop)."""
+def update_borrower(user, borrower_id):
+    """A borrower edit is applied IMMEDIATELY — no maker-checker approval
+    step (Grace's correction: unlike loans/penalties, a borrower edit is
+    not routed through a Checker). The old/new value of every field
+    actually changed is still written to the audit trail, same as before.
+    Still blocked while a deactivate/hard-delete request is pending on this
+    borrower (that part of the flow is unchanged — see propose_borrower_delete) —
+    editing a borrower that's about to be removed makes no sense.
+
+    A loan already issued is never affected: its borrower_*_snapshot
+    columns were captured once, at issuance, and are never touched here."""
     borrower = Borrower.query.get_or_404(borrower_id)
     if BorrowerEditRequest.query.filter_by(borrower_id=borrower.id, status="pending").first():
-        return error("this borrower already has a pending edit or delete request awaiting approval", 409)
+        return error("this borrower has a pending deactivate/delete request awaiting approval", 409)
 
     data = request.get_json(silent=True) or {}
     changes = {}
@@ -461,17 +474,16 @@ def propose_borrower_edit(user, borrower_id):
         return error(str(exc))
 
     if not changes:
-        return jsonify({"message": "No changes to propose.", "borrower": borrower_json(borrower)})
+        return jsonify({"message": "No changes to apply.", "borrower": borrower_json(borrower)})
 
     duplicate_warning = None
     if "id_number" in changes or "phone" in changes:
         new_id_type = changes.get("id_type", {}).get("new", borrower.id_type)
         new_id_number = changes.get("id_number", {}).get("new", borrower.id_number)
         new_phone = changes.get("phone", {}).get("new", borrower.phone)
-        # An EXACT id match hard-blocks here too — not just a warning — so a
-        # proposal that could never actually be approved (it would hit
-        # uq_borrowers_id_type_number the moment it's applied) is never
-        # created in the first place.
+        # An EXACT id match hard-blocks here too — not just a warning — the
+        # DB's own uq_borrowers_id_type_number would refuse it anyway; this
+        # just gives a clearer message with a link to the existing record.
         if new_id_number:
             exact = Borrower.query.filter(
                 Borrower.id_type == new_id_type, Borrower.id_number == new_id_number, Borrower.id != borrower.id,
@@ -489,26 +501,25 @@ def propose_borrower_edit(user, borrower_id):
                 "matches": [{"id": d.id, "name": d.name} for d in duplicates],
             }
 
-    request_row = BorrowerEditRequest(
-        borrower_id=borrower.id, borrower_name_snapshot=borrower.name, action="edit", changes=changes,
-        reason=data.get("reason"), created_by=user.id, creator_name_snapshot=user.name,
-    )
-    db.session.add(request_row)
-    try:
-        db.session.flush()
-    except IntegrityError:
-        # The partial unique index's race-proof backstop: someone else's
-        # proposal for this same borrower landed between the check above
-        # and this insert.
-        db.session.rollback()
-        return error("this borrower already has a pending edit or delete request awaiting approval", 409)
+    for field, change in changes.items():
+        setattr(borrower, field, change["new"])
+    if "id_type" in changes or "id_number" in changes:
+        borrower.id_verified = False
+        borrower.id_verified_at = None
+
     detail = "; ".join(f"{f}: {c['old']!r} -> {c['new']!r}" for f, c in changes.items())
-    audit(user, "PROPOSE_EDIT", "borrowers", borrower.id, details=detail)
-    db.session.commit()
-    body = {"borrower_edit_request": borrower_edit_request_json(request_row)}
+    try:
+        audit(user, "EDIT", "borrowers", borrower.id, details=detail)
+        db.session.commit()
+    except IntegrityError:
+        # The DB's own backstop: another borrower independently acquired the
+        # same ID between the check above and this commit.
+        db.session.rollback()
+        return error("this ID number is already registered", 409)
+    body = {"borrower": borrower_json(borrower)}
     if duplicate_warning:
         body["duplicate_warning"] = duplicate_warning
-    return jsonify(body), 201
+    return jsonify(body)
 
 
 @operations_bp.post("/borrowers/<int:borrower_id>/verify-id")
@@ -696,6 +707,10 @@ def create_loan(user):
         if term < 1:
             return error("term_months must be at least 1")
 
+        loan_type = data.get("loan_type") or "reducing_balance"
+        if loan_type not in LOAN_TYPES:
+            return error(f"loan_type must be one of: {', '.join(LOAN_TYPES)}")
+
         if product is not None:
             # Rate ONLY is locked to the product — never the client's own rate.
             rate = Decimal(str(product.default_interest_rate))
@@ -718,7 +733,7 @@ def create_loan(user):
         return error(str(exc))
     loan = Loan(
         borrower_id=borrower.id, loan_product_id=product.id if product else None, principal_amount=principal,
-        interest_rate=rate, term_months=term, start_date=start_date, status="pending_approval",
+        interest_rate=rate, term_months=term, loan_type=loan_type, start_date=start_date, status="pending_approval",
         outstanding_balance=principal, created_by=user.id, creator_name_snapshot=user.name,
         rounding_step=company_rounding_step(),
         # Captured once, now, at issuance — the loan's own document (the
@@ -735,6 +750,120 @@ def create_loan(user):
     audit(user, "CREATE", "loans", loan.id)
     db.session.commit()
     return jsonify({"loan": json_row(loan)}), 201
+
+
+@operations_bp.put("/loans/<int:loan_id>")
+@permission_required("loans:create")
+def edit_loan(user, loan_id):
+    """Edit a loan's own terms (principal/rate/term/type) directly — applied
+    immediately, no maker-checker approval step, logged to the audit trail
+    like any other write. Allowed even on an already-approved/active loan
+    with repayments against it.
+
+    Critical invariant: a repayment already recorded NEVER changes, and
+    neither does any PaymentSchedule row that already has one against it
+    ('paid' or 'partial' — a 'partial' row's own stored figures are a
+    residual tied to real Repayment rows via schedule_id, exactly like
+    apply_repayment()'s own later_rows reprojection never touches the
+    row it's currently settling). Only the genuinely forward-looking
+    remainder — rows with no repayment against them yet ('upcoming',
+    'missed') — is dropped and rebuilt with the new terms, over the same
+    number of periods implied by the new term_months net of what is
+    already locked in.
+    """
+    loan = Loan.query.filter_by(id=loan_id).with_for_update().first()
+    if loan is None:
+        return error("not found", 404)
+    if loan.status in ("closed", "rejected"):
+        return error(f"cannot edit a loan that is {loan.status}", 409)
+
+    data = request.get_json(silent=True) or {}
+    try:
+        new_principal = (
+            parse_money(data["principal_amount"], "principal_amount", min_value=Decimal("1"))
+            if "principal_amount" in data else money(loan.principal_amount)
+        )
+        if "interest_rate" in data:
+            new_rate = Decimal(str(data["interest_rate"]))
+            if new_rate < 0:
+                return error("interest_rate must not be negative")
+        else:
+            new_rate = Decimal(str(loan.interest_rate))
+        new_term = int(data["term_months"]) if "term_months" in data else loan.term_months
+        if new_term < 1:
+            return error("term_months must be at least 1")
+        new_type = data.get("loan_type", loan.loan_type)
+        if new_type not in LOAN_TYPES:
+            return error(f"loan_type must be one of: {', '.join(LOAN_TYPES)}")
+    except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        return error(str(exc))
+
+    changes = {}
+    for field, old, new in (
+        ("principal_amount", money(loan.principal_amount), new_principal),
+        ("interest_rate", Decimal(str(loan.interest_rate)), new_rate),
+        ("term_months", loan.term_months, new_term),
+        ("loan_type", loan.loan_type, new_type),
+    ):
+        if old != new:
+            changes[field] = {"old": str(old), "new": str(new)}
+    if not changes:
+        return jsonify({"message": "No changes to apply.", "loan": json_row(loan)})
+
+    locked_rows = sorted((r for r in loan.schedules if r.status in ("paid", "partial")), key=lambda r: r.due_date)
+    deletable_rows = sorted((r for r in loan.schedules if r.status in ("upcoming", "missed")), key=lambda r: r.due_date)
+    partial_row = next((r for r in locked_rows if r.status == "partial"), None)
+
+    if new_term <= len(locked_rows):
+        return error(f"term_months must be greater than the {len(locked_rows)} instalment(s) already settled or in progress")
+
+    repaid_so_far = money(money(loan.principal_amount) - money(loan.outstanding_balance))
+    new_balance = money(new_principal - repaid_so_far)
+    # The current partial row's own residual principal is frozen (never
+    # recomputed here, same as apply_repayment()'s later_rows projection) —
+    # carve it out of the pool before spreading the rest over the brand-new
+    # forward rows, exactly like apply_repayment() does for `rest`.
+    reserved = money(partial_row.principal_portion) if partial_row else Decimal("0")
+    rest = money(new_balance - reserved)
+
+    for row in deletable_rows:
+        loan.schedules.remove(row)
+        db.session.delete(row)
+
+    loan.principal_amount = new_principal
+    loan.interest_rate = new_rate
+    loan.term_months = new_term
+    loan.loan_type = new_type
+    loan.outstanding_balance = new_balance
+
+    if new_balance <= 0:
+        loan.status = "closed"
+        if partial_row is not None:
+            partial_row.status = "paid"
+    elif rest > 0:
+        remaining_count = new_term - len(locked_rows)
+        # build_loan_schedule()'s own due dates are `start_date` PLUS each
+        # period (period 1 = start_date + 1 month) — so to keep the first
+        # new row landing exactly where the first deleted row was, back up
+        # one month from it; with no deletable rows left (the term grew
+        # past what was already scheduled), the last locked row itself is
+        # the base to count forward from instead.
+        start_date = add_months(deletable_rows[0].due_date, -1) if deletable_rows else locked_rows[-1].due_date
+        rows = build_loan_schedule(new_type, rest, new_rate, remaining_count, start_date, step=loan.rounding_step)
+        for row in rows:
+            loan.schedules.append(
+                PaymentSchedule(
+                    due_date=row["due_date"], original_due_date=row["due_date"],
+                    expected_amount=row["payment_amount"], original_expected_amount=row["payment_amount"],
+                    principal_portion=row["principal_portion"], interest_portion=row["interest_portion"],
+                    status="upcoming",
+                )
+            )
+
+    detail = "; ".join(f"{f}: {c['old']!r} -> {c['new']!r}" for f, c in changes.items())
+    audit(user, "EDIT", "loans", loan.id, details=detail)
+    db.session.commit()
+    return jsonify({"loan": json_row(loan)})
 
 
 OPEN_SCHEDULE_STATUSES = ("upcoming", "partial", "missed")
@@ -831,7 +960,7 @@ def apply_repayment(loan, amount, payment_date):
     else:
         rest = new_balance - owed_on_row
         if later_rows and rest > 0:
-            projected = amortization_schedule(rest, loan.interest_rate, len(later_rows), step=loan.rounding_step)
+            projected = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, len(later_rows), step=loan.rounding_step)
             for entry, projection in zip(later_rows, projected):
                 entry.expected_amount = projection["payment_amount"]
                 entry.principal_portion = projection["principal_portion"]
@@ -841,7 +970,7 @@ def apply_repayment(loan, amount, payment_date):
             # the last instalment): add a final instalment so it is never left
             # active with nothing scheduled.
             last_due = row.due_date if row else payment_date
-            tail = amortization_schedule(rest, loan.interest_rate, 1, last_due, step=loan.rounding_step)[0]
+            tail = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, 1, last_due, step=loan.rounding_step)[0]
             loan.schedules.append(
                 PaymentSchedule(
                     due_date=tail["due_date"], original_due_date=tail["due_date"],
@@ -986,13 +1115,13 @@ def carry_over_overdue_partial_periods(loan, today=None):
 
     rest = money(loan.outstanding_balance)
     if later_rows and rest > 0:
-        projected = amortization_schedule(rest, loan.interest_rate, len(later_rows), step=loan.rounding_step)
+        projected = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, len(later_rows), step=loan.rounding_step)
         for entry, projection in zip(later_rows, projected):
             entry.expected_amount = projection["payment_amount"]
             entry.principal_portion = projection["principal_portion"]
             entry.interest_portion = projection["interest_portion"]
     elif not later_rows and rest > 0:
-        tail = amortization_schedule(rest, loan.interest_rate, 1, row.due_date, step=loan.rounding_step)[0]
+        tail = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, 1, row.due_date, step=loan.rounding_step)[0]
         loan.schedules.append(
             PaymentSchedule(
                 due_date=tail["due_date"], original_due_date=tail["due_date"],
