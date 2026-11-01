@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import contains_eager, joinedload, selectinload
 
 from extensions import db
@@ -19,7 +19,7 @@ from models import (
 from routes.auth import auth_required
 from routes.operations import OPEN_SCHEDULE_STATUSES, borrower_json, can_decide, settlement_amount
 from services.listing import paginate
-from services.loan_calculator import money, schedule_totals
+from services.loan_calculator import local_today, money, schedule_totals
 from services.permissions import has_permission
 
 resources_bp = Blueprint("resources", __name__, url_prefix="/api")
@@ -96,6 +96,8 @@ def loan_summary(loan, viewer):
     item["product_name"] = loan.loan_product.name if loan.loan_product else None
     item["can_decide"] = can_decide(viewer, loan)
     item["settlement_amount"] = float(settlement_amount(loan))
+    dates = [row.due_date.isoformat() for row in loan.schedules if row.due_date]
+    item["closing_date"] = max(dates) if dates else None
     return item
 
 
@@ -116,6 +118,12 @@ def list_loans(current_user):
     status_filter = request.args.get("status")
     if status_filter:
         query = query.filter(Loan.status == status_filter)
+    summary_query = query
+    search = (request.args.get("q") or "").strip()
+    if search:
+        like = f"%{search}%"
+        summary_query = summary_query.filter(or_(Borrower.name.ilike(like), Borrower.phone.ilike(like)))
+    summary = summary_query.with_entities(func.count(Loan.id), func.coalesce(func.sum(Loan.principal_amount), 0)).first()
     rows, pagination = paginate(
         query,
         request.args,
@@ -123,7 +131,7 @@ def list_loans(current_user):
         sortable={"id": Loan.id, "status": Loan.status, "start_date": Loan.start_date, "borrower_name": Borrower.name},
         default_sort=Loan.id.desc(),
     )
-    body = {"loans": [loan_summary(loan, current_user) for loan in rows]}
+    body = {"loans": [loan_summary(loan, current_user) for loan in rows], "summary": {"count": int(summary[0]), "principal": float(summary[1])}}
     if pagination is not None:
         body["pagination"] = pagination
     return jsonify(body)
@@ -281,8 +289,23 @@ def list_audit_logs(current_user):
 @resources_bp.get("/dashboard/summary")
 @auth_required
 def dashboard_summary(_current_user):
+    today = local_today()
+    active_loans = Loan.query.filter_by(status="active").options(joinedload(Loan.borrower), selectinload(Loan.schedules)).all()
+    due_soon, overdue, closing_soon = [], [], []
+    for loan in active_loans:
+        open_rows = [r for r in loan.schedules if r.status in OPEN_SCHEDULE_STATUSES]
+        for row in open_rows:
+            item = {"loan_id": loan.id, "borrower_name": loan.borrower.name if loan.borrower else "—", "reference": f"#{loan.id}", "amount_due": float(row.expected_amount), "due_date": row.due_date.isoformat(), "days": (row.due_date - today).days}
+            if row.due_date < today:
+                overdue.append(item)
+            elif row.due_date <= today.fromordinal(today.toordinal() + 7):
+                due_soon.append(item)
+        closing = max((r.due_date for r in loan.schedules), default=None)
+        if closing and today <= closing <= today.fromordinal(today.toordinal() + 30):
+            closing_soon.append({"loan_id": loan.id, "borrower_name": loan.borrower.name if loan.borrower else "—", "reference": f"#{loan.id}", "amount_due": float(next((r.expected_amount for r in loan.schedules if r.due_date == closing), 0)), "due_date": closing.isoformat(), "days": (closing - today).days})
     return jsonify(
         {
+            "notices": {"due_soon": due_soon, "overdue": overdue, "closing_soon": closing_soon},
             "summary": {
                 # Active only (Part: deactivated borrowers don't count
                 # toward an "active" dashboard figure) — total/all-time

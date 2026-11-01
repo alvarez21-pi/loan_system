@@ -795,7 +795,8 @@ export const auditLogs = {
 
 export const dashboard = {
   async summary() {
-    return { data: toItem(await request(ENDPOINTS.dashboard), "summary") };
+    const result = await request(ENDPOINTS.dashboard);
+    return { data: { ...(result.summary || {}), notices: result.notices || {} } };
   },
 };
 

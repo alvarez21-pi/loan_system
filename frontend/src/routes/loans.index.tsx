@@ -49,6 +49,7 @@ const EMPTY = {
   principal_amount: "",
   interest_rate: "",
   term_months: "",
+  term_unit: "monthly",
   start_date: "",
   loan_type: "reducing_balance",
 };
@@ -72,11 +73,13 @@ function LoansPage() {
   // (never just the current page), while the main loan list is the
   // server-paginated/searchable one (Phase 5).
   const pendingList = useResource(() => loans.list(), []);
-  const list = usePaginatedResource((params: any) => loans.list(params) as Promise<{ data: any[]; pagination: any }>, []);
+  const list = usePaginatedResource((params: any) => loans.list({ ...params, status: "active" }) as Promise<{ data: any[]; pagination: any }>, []);
+  const settledList = usePaginatedResource((params: any) => loans.list({ ...params, status: "closed" }) as Promise<{ data: any[]; pagination: any }>, []);
   // A deactivated borrower must not be selectable for a NEW loan.
   const borrowerList = useResource(() => borrowers.list({ active_only: true }), []);
   const productList = useResource(() => loanProducts.list(), []);
   const [form, setForm] = useState<any>(EMPTY);
+  const termUnitLabel = form.term_unit === "daily" ? "days" : form.term_unit === "weekly" ? "weeks" : "months";
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [busyKey, setBusyKey] = useState("");
@@ -87,6 +90,7 @@ function LoansPage() {
 
   useAutoRefresh(pendingList.reload);
   useAutoRefresh(list.reload);
+  useAutoRefresh(settledList.reload);
 
   // No product selected -> "Negotiated rate": the Maker sets principal/
   // rate/term directly (Part 2.2). A product selected -> only its RATE is
@@ -125,7 +129,7 @@ function LoansPage() {
       calculator
         .preview({
           principal, interest_rate: Number(rate), term_months: term, loan_type: form.loan_type,
-          start_date: form.start_date || undefined,
+          start_date: form.start_date || undefined, term_unit: form.term_unit,
         })
         .then((result) => {
           setPreview(result);
@@ -139,14 +143,14 @@ function LoansPage() {
     }, 400);
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.principal_amount, form.interest_rate, form.term_months, form.start_date, form.loan_type]);
+  }, [form.principal_amount, form.interest_rate, form.term_months, form.start_date, form.loan_type, form.term_unit]);
 
   function validate() {
     const next: Record<string, string> = {};
     if (!form.borrower_id) next.borrower_id = "Select a borrower.";
     if (!Number(form.principal_amount)) next.principal_amount = "Enter the principal amount.";
     if (form.interest_rate === "" || Number(form.interest_rate) < 0) next.interest_rate = "Enter a monthly interest rate.";
-    if (!Number(form.term_months)) next.term_months = "Enter the term in months.";
+    if (!Number(form.term_months)) next.term_months = `Enter the term in ${termUnitLabel}.`;
     if (!form.start_date) next.start_date = "Select a start date.";
 
     if (selectedProduct) {
@@ -156,10 +160,11 @@ function LoansPage() {
       if (selectedProduct.max_amount != null && amount > Number(selectedProduct.max_amount))
         next.principal_amount = `Maximum for this product is ${money(selectedProduct.max_amount)}.`;
       const term = Number(form.term_months);
-      if (selectedProduct.min_term_months != null && term < Number(selectedProduct.min_term_months))
-        next.term_months = `Minimum term for this product is ${selectedProduct.min_term_months} months.`;
-      if (selectedProduct.max_term_months != null && term > Number(selectedProduct.max_term_months))
-        next.term_months = `Maximum term for this product is ${selectedProduct.max_term_months} months.`;
+      const durationMonths = form.term_unit === "daily" ? term / 30 : form.term_unit === "weekly" ? term / 4 : term;
+      if (selectedProduct.min_term_months != null && durationMonths < Number(selectedProduct.min_term_months))
+        next.term_months = `Minimum duration for this product is ${selectedProduct.min_term_months} months.`;
+      if (selectedProduct.max_term_months != null && durationMonths > Number(selectedProduct.max_term_months))
+        next.term_months = `Maximum duration for this product is ${selectedProduct.max_term_months} months.`;
     }
     setErrors(next);
     if (Object.keys(next).length > 0) {
@@ -181,6 +186,7 @@ function LoansPage() {
         principal_amount: Number(form.principal_amount),
         interest_rate: Number(form.interest_rate),
         term_months: Number(form.term_months),
+        term_unit: form.term_unit,
         start_date: form.start_date,
         loan_type: form.loan_type,
       });
@@ -205,7 +211,7 @@ function LoansPage() {
     const borrowerName = row.borrower_name || "this borrower";
     const question =
       action === "approve"
-        ? `This will activate Loan #${row.id} for ${borrowerName} — ${money(row.principal_amount)} at ${percent(row.interest_rate)} per month over ${fmtNumber(row.term_months)} months, and deliver the schedule to the borrower. Approve?`
+        ? `This will activate Loan #${row.id} for ${borrowerName} — ${money(row.principal_amount)} at ${percent(row.interest_rate)} per month over ${fmtNumber(row.term_months)} ${row.term_unit === "daily" ? "days" : row.term_unit === "weekly" ? "weeks" : "months"}, and deliver the schedule to the borrower. Approve?`
         : `This will reject Loan #${row.id} for ${borrowerName}. Are you sure?`;
     if (!window.confirm(question)) return;
     let rejection_reason: string | undefined;
@@ -294,8 +300,9 @@ function LoansPage() {
                 { key: "loan_type", label: "Type", render: (r: any) => (r.loan_type === "interest_only" ? "Interest-only" : "Reducing balance") },
                 { key: "principal_amount", label: "Principal", render: (r: any) => money(r.principal_amount) },
                 { key: "interest_rate", label: "Monthly Rate (%)", render: (r: any) => percent(r.interest_rate) },
-                { key: "term_months", label: "Term (months)", render: (r: any) => fmtNumber(r.term_months) },
+                { key: "term_months", label: "Term", render: (r: any) => `${fmtNumber(r.term_months)} ${r.term_unit === "daily" ? "days" : r.term_unit === "weekly" ? "weeks" : "months"}` },
                 { key: "start_date", label: "Start", sortKey: "start_date" },
+                { key: "closing_date", label: "Closing" },
                 { key: "outstanding_balance", label: "Balance", render: (r: any) => money(r.outstanding_balance) },
                 {
                   key: "status",
@@ -319,13 +326,24 @@ function LoansPage() {
                   </div>
                   <div className="mt-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
                     <StatusBadge status={r.status} reason={r.rejection_reason} />
-                    <span>{r.start_date}</span>
+                    <span>Start {r.start_date} · Close {r.closing_date || "—"}</span>
                   </div>
                 </div>
               )}
             />
           ) : null}
           <Pagination page={list.page} pagination={list.pagination} onPageChange={list.setPage} />
+          <p className="mt-3 text-sm font-medium">Active loans: {fmtNumber(list.summary?.count ?? list.pagination?.total ?? rows.length)} · Principal: {money(list.summary?.principal ?? rows.reduce((sum: number, r: any) => sum + Number(r.principal_amount || 0), 0))}</p>
+          <div className="mt-6 border-t pt-4">
+            <h2 className="mb-3 text-lg font-semibold">Settled Loans</h2>
+            <DataTable rows={settledList.data || []} empty="No settled loans." columns={[
+              { key: "id", label: "Loan", render: (r: any) => <Link to="/loans/$id" params={{ id: String(r.id) }} className="underline">#{r.id}</Link> },
+              { key: "borrower_name", label: "Borrower" }, { key: "principal_amount", label: "Principal", render: (r: any) => money(r.principal_amount) },
+              { key: "term", label: "Term", render: (r: any) => `${r.term_months} ${r.term_unit === "daily" ? "days" : r.term_unit === "weekly" ? "weeks" : "months"}` },
+              { key: "start_date", label: "Start" }, { key: "closing_date", label: "Closing" },
+            ]} />
+            <p className="mt-3 text-sm font-medium">Settled loans: {fmtNumber(settledList.summary?.count ?? settledList.pagination?.total ?? (settledList.data || []).length)} · Principal: {money(settledList.summary?.principal ?? (settledList.data || []).reduce((sum: number, r: any) => sum + Number(r.principal_amount || 0), 0))}</p>
+          </div>
         </Card>
 
         {canCreate ? (
@@ -375,8 +393,13 @@ function LoansPage() {
                     disabled={rateLocked}
                   />
                 </Field>
+                <Field label="Term unit" name="term_unit">
+                  <Select value={form.term_unit} onChange={(e: any) => set("term_unit", e.target.value)}>
+                    <option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                  </Select>
+                </Field>
                 <Field
-                  label="Term (months)"
+                  label={`Term (${form.term_unit === "daily" ? "days" : form.term_unit === "weekly" ? "weeks" : "months"})`}
                   name="term_months"
                   error={errors.term_months}
                   hint={

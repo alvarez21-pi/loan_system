@@ -62,6 +62,8 @@ function LoanDetail() {
       principal_amount: String(loan.principal_amount),
       interest_rate: String(loan.interest_rate),
       term_months: String(loan.term_months),
+      term_unit: loan.term_unit || "monthly",
+      start_date: loan.start_date,
       loan_type: loan.loan_type || "reducing_balance",
     });
   }
@@ -75,6 +77,8 @@ function LoanDetail() {
         principal_amount: Number(editForm.principal_amount),
         interest_rate: Number(editForm.interest_rate),
         term_months: Number(editForm.term_months),
+        term_unit: editForm.term_unit,
+        start_date: editForm.start_date,
         loan_type: editForm.loan_type,
       });
       showToast("Loan updated. The remaining schedule was recalculated; past repayments are unchanged.", "success");
@@ -115,7 +119,7 @@ function LoanDetail() {
     const borrower = loan.borrower_name || "this borrower";
     const question =
       action === "approve"
-        ? `This will activate Loan #${loan.id} for ${borrower} — ${money(loan.principal_amount)} at ${percent(loan.interest_rate)} per month over ${fmtNumber(loan.term_months)} months, and send the schedule to the borrower. Approve?`
+        ? `This will activate Loan #${loan.id} for ${borrower} — ${money(loan.principal_amount)} at ${percent(loan.interest_rate)} per month over ${fmtNumber(loan.term_months)} ${loan.term_unit === "daily" ? "days" : loan.term_unit === "weekly" ? "weeks" : "months"}, and send the schedule to the borrower. Approve?`
         : `This will reject Loan #${loan.id} for ${borrower}. Are you sure?`;
     if (!window.confirm(question)) return;
     let rejection_reason: string | undefined;
@@ -193,8 +197,9 @@ function LoanDetail() {
                 ["Status", <StatusBadge key="status" status={loan.status} reason={loan.rejection_reason} />],
                 ["Principal", money(loan.principal_amount)],
                 ["Monthly Interest Rate", `${percent(loan.interest_rate)} per month`],
-                ["Term", `${fmtNumber(loan.term_months)} months`],
+                ["Term", `${fmtNumber(loan.term_months)} ${loan.term_unit === "daily" ? "days" : loan.term_unit === "weekly" ? "weeks" : "months"}`],
                 ["Start date", loan.start_date],
+                ["Closing date", loan.closing_date || (loan.schedules || []).map((r: any) => r.due_date).sort().at(-1) || "—"],
                 ["Outstanding balance", money(loan.outstanding_balance)],
                 ["Instalment rounding step", `${fmtNumber(loan.rounding_step)} shillings`],
                 ["Paid to date", totals ? money(totals.paid_to_date) : "—"],
@@ -370,7 +375,13 @@ function LoanDetail() {
                 <Field label="Monthly Interest Rate (%)">
                   <NumberInput decimals={2} value={editForm.interest_rate} onValueChange={(v) => setEditForm({ ...editForm, interest_rate: v })} />
                 </Field>
-                <Field label="Term (months)">
+                <Field label="Start date">
+                  <Input type="date" value={editForm.start_date} onChange={(e: any) => setEditForm({ ...editForm, start_date: e.target.value })} />
+                </Field>
+                <Field label="Term unit">
+                  <Select value={editForm.term_unit} onChange={(e: any) => setEditForm({ ...editForm, term_unit: e.target.value })}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option></Select>
+                </Field>
+                <Field label={`Term (${editForm.term_unit === "daily" ? "days" : editForm.term_unit === "weekly" ? "weeks" : "months"})`}>
                   <NumberInput integer value={editForm.term_months} onValueChange={(v) => setEditForm({ ...editForm, term_months: v })} />
                 </Field>
                 <div className="flex gap-2 pt-1">

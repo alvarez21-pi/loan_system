@@ -39,7 +39,7 @@ export function usePaginatedResource(loader, deps = []) {
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
       const result = await loader({ page, page_size: PAGE_SIZE, q: debouncedQ || undefined, sort: sort || undefined, order });
-      setState({ data: result.data || [], pagination: result.pagination || null, loading: false, error: "" });
+      setState({ data: result.data || [], pagination: result.pagination || null, summary: result.raw?.summary || null, loading: false, error: "" });
     } catch (error) {
       setState({ data: [], pagination: null, loading: false, error: errorMessage(error) });
     }

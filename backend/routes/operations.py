@@ -36,6 +36,9 @@ from services.loan_calculator import (
     build_loan_schedule,
     local_today,
     money,
+    period_due_date,
+    period_interest_rate,
+    term_in_months,
     schedule_totals,
     whole_up,
 )
@@ -163,6 +166,7 @@ def build_schedules(loan, start_date=None, principal=None, term=None):
         term if term is not None else loan.term_months,
         start_date or loan.start_date,
         step=loan.rounding_step,
+        term_unit=loan.term_unit or "monthly",
     )
     loan.schedules.clear()
     for row in rows:
@@ -193,7 +197,10 @@ def calculator_preview(_user):
         # due-date column can be shown without forcing the user to pick one.
         start_date = parse_date(data["start_date"], "start_date") if data.get("start_date") else local_today()
         step = int(data["rounding_step"]) if data.get("rounding_step") else company_rounding_step()
-        schedule = build_loan_schedule(loan_type, data["principal"], data["interest_rate"], data["term_months"], start_date, step=step)
+        term_unit = data.get("term_unit", "monthly")
+        if term_unit not in ("daily", "weekly", "monthly"):
+            return error("term_unit must be daily, weekly, or monthly")
+        schedule = build_loan_schedule(loan_type, data["principal"], data["interest_rate"], data["term_months"], start_date, step=step, term_unit=term_unit)
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         return error(str(exc))
     # Same shared computation the loan detail page, schedule PDF and borrower
@@ -705,6 +712,9 @@ def create_loan(user):
         term = int(data["term_months"])
         if term < 1:
             return error("term_months must be at least 1")
+        term_unit = data.get("term_unit", "monthly")
+        if term_unit not in ("daily", "weekly", "monthly"):
+            return error("term_unit must be daily, weekly, or monthly")
 
         loan_type = data.get("loan_type") or "reducing_balance"
         if loan_type not in LOAN_TYPES:
@@ -713,10 +723,17 @@ def create_loan(user):
         if product is not None:
             # Rate ONLY is locked to the product — never the client's own rate.
             rate = Decimal(str(product.default_interest_rate))
-            if product.min_term_months is not None and term < product.min_term_months:
-                return error(f"term_months must be at least {product.min_term_months} for this product")
-            if product.max_term_months is not None and term > product.max_term_months:
-                return error(f"term_months must be at most {product.max_term_months} for this product")
+            if term_unit == "monthly":
+                if product.min_term_months is not None and term < product.min_term_months:
+                    return error(f"term_months must be at least {product.min_term_months} for this product")
+                if product.max_term_months is not None and term > product.max_term_months:
+                    return error(f"term_months must be at most {product.max_term_months} for this product")
+            else:
+                duration_months = term_in_months(term, term_unit)
+                if product.min_term_months is not None and duration_months < product.min_term_months:
+                    return error(f"loan duration must be at least {product.min_term_months} months for this product")
+                if product.max_term_months is not None and duration_months > product.max_term_months:
+                    return error(f"loan duration must be at most {product.max_term_months} months for this product")
         else:
             rate = Decimal(str(data["interest_rate"]))
             if rate < 0:
@@ -732,7 +749,7 @@ def create_loan(user):
         return error(str(exc))
     loan = Loan(
         borrower_id=borrower.id, loan_product_id=product.id if product else None, principal_amount=principal,
-        interest_rate=rate, term_months=term, loan_type=loan_type, start_date=start_date, status="pending_approval",
+        interest_rate=rate, term_months=term, term_unit=term_unit, loan_type=loan_type, start_date=start_date, status="pending_approval",
         outstanding_balance=principal, created_by=user.id, creator_name_snapshot=user.name,
         rounding_step=company_rounding_step(),
         # Captured once, now, at issuance — the loan's own document (the
@@ -794,6 +811,10 @@ def edit_loan(user, loan_id):
         new_type = data.get("loan_type", loan.loan_type)
         if new_type not in LOAN_TYPES:
             return error(f"loan_type must be one of: {', '.join(LOAN_TYPES)}")
+        new_unit = data.get("term_unit", loan.term_unit or "monthly")
+        if new_unit not in ("daily", "weekly", "monthly"):
+            return error("term_unit must be daily, weekly, or monthly")
+        new_start_date = parse_date(data["start_date"], "start_date") if "start_date" in data else loan.start_date
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         return error(str(exc))
 
@@ -803,6 +824,8 @@ def edit_loan(user, loan_id):
         ("interest_rate", Decimal(str(loan.interest_rate)), new_rate),
         ("term_months", loan.term_months, new_term),
         ("loan_type", loan.loan_type, new_type),
+        ("term_unit", loan.term_unit or "monthly", new_unit),
+        ("start_date", loan.start_date, new_start_date),
     ):
         if old != new:
             changes[field] = {"old": str(old), "new": str(new)}
@@ -812,6 +835,10 @@ def edit_loan(user, loan_id):
     locked_rows = sorted((r for r in loan.schedules if r.status in ("paid", "partial")), key=lambda r: r.due_date)
     deletable_rows = sorted((r for r in loan.schedules if r.status in ("upcoming", "missed")), key=lambda r: r.due_date)
     partial_row = next((r for r in locked_rows if r.status == "partial"), None)
+    schedule_terms_changed = any(
+        field in changes for field in ("principal_amount", "interest_rate", "term_months", "loan_type", "term_unit")
+    )
+    start_date_only_changed = "start_date" in changes and not schedule_terms_changed
 
     if new_term <= len(locked_rows):
         return error(f"term_months must be greater than the {len(locked_rows)} instalment(s) already settled or in progress")
@@ -825,20 +852,27 @@ def edit_loan(user, loan_id):
     reserved = money(partial_row.principal_portion) if partial_row else Decimal("0")
     rest = money(new_balance - reserved)
 
-    for row in deletable_rows:
-        loan.schedules.remove(row)
-        db.session.delete(row)
+    if schedule_terms_changed:
+        for row in deletable_rows:
+            loan.schedules.remove(row)
+            db.session.delete(row)
 
     loan.principal_amount = new_principal
     loan.interest_rate = new_rate
     loan.term_months = new_term
     loan.loan_type = new_type
+    loan.term_unit = new_unit
+    loan.start_date = new_start_date
     loan.outstanding_balance = new_balance
 
     if new_balance <= 0:
         loan.status = "closed"
         if partial_row is not None:
             partial_row.status = "paid"
+    elif start_date_only_changed:
+        for index, row in enumerate(deletable_rows, start=len(locked_rows) + 1):
+            row.due_date = period_due_date(new_start_date, index, new_unit)
+            row.original_due_date = row.due_date
     elif rest > 0:
         remaining_count = new_term - len(locked_rows)
         # build_loan_schedule()'s own due dates are `start_date` PLUS each
@@ -847,8 +881,15 @@ def edit_loan(user, loan_id):
         # one month from it; with no deletable rows left (the term grew
         # past what was already scheduled), the last locked row itself is
         # the base to count forward from instead.
-        start_date = add_months(deletable_rows[0].due_date, -1) if deletable_rows else locked_rows[-1].due_date
-        rows = build_loan_schedule(new_type, rest, new_rate, remaining_count, start_date, step=loan.rounding_step)
+        # Rebuild only unpaid rows against the edited start date; rows with recorded payments stay frozen.
+        schedule_start_date = new_start_date if "start_date" in changes else (
+            period_due_date(deletable_rows[0].due_date, -1, new_unit)
+            if deletable_rows else locked_rows[-1].due_date
+        )
+        rows = build_loan_schedule(new_type, rest, new_rate, remaining_count, schedule_start_date, step=loan.rounding_step, term_unit=new_unit)
+        if "start_date" in changes:
+            for index, row in enumerate(rows, start=len(locked_rows) + 1):
+                row["due_date"] = period_due_date(new_start_date, index, new_unit)
         for row in rows:
             loan.schedules.append(
                 PaymentSchedule(
@@ -959,7 +1000,7 @@ def apply_repayment(loan, amount, payment_date):
     else:
         rest = new_balance - owed_on_row
         if later_rows and rest > 0:
-            projected = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, len(later_rows), step=loan.rounding_step)
+            projected = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, len(later_rows), step=loan.rounding_step, term_unit=loan.term_unit or "monthly")
             for entry, projection in zip(later_rows, projected):
                 entry.expected_amount = projection["payment_amount"]
                 entry.principal_portion = projection["principal_portion"]
@@ -969,7 +1010,7 @@ def apply_repayment(loan, amount, payment_date):
             # the last instalment): add a final instalment so it is never left
             # active with nothing scheduled.
             last_due = row.due_date if row else payment_date
-            tail = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, 1, last_due, step=loan.rounding_step)[0]
+            tail = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, 1, last_due, step=loan.rounding_step, term_unit=loan.term_unit or "monthly")[0]
             loan.schedules.append(
                 PaymentSchedule(
                     due_date=tail["due_date"], original_due_date=tail["due_date"],
@@ -1029,7 +1070,7 @@ def resync_open_row_interest(loan):
     if not open_rows:
         return
     row = open_rows[0]
-    monthly_rate = Decimal(str(loan.interest_rate)) / Decimal(100)
+    monthly_rate = period_interest_rate(loan.interest_rate, loan.term_unit or "monthly")
     new_interest = whole_up(money(loan.outstanding_balance) * monthly_rate)
     delta = new_interest - money(row.interest_portion)
     if delta == 0:
@@ -1071,7 +1112,7 @@ def delay_missed_schedule_periods(loan, today=None):
         for row in open_rows:
             if row.original_due_date is None:
                 row.original_due_date = row.due_date
-            row.due_date = add_months(row.due_date, 1)
+            row.due_date = period_due_date(row.due_date, 1, loan.term_unit or "monthly")
             row.delayed_months = (row.delayed_months or 0) + 1
             shifted.append(row)
     return shifted
@@ -1114,13 +1155,13 @@ def carry_over_overdue_partial_periods(loan, today=None):
 
     rest = money(loan.outstanding_balance)
     if later_rows and rest > 0:
-        projected = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, len(later_rows), step=loan.rounding_step)
+        projected = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, len(later_rows), step=loan.rounding_step, term_unit=loan.term_unit or "monthly")
         for entry, projection in zip(later_rows, projected):
             entry.expected_amount = projection["payment_amount"]
             entry.principal_portion = projection["principal_portion"]
             entry.interest_portion = projection["interest_portion"]
     elif not later_rows and rest > 0:
-        tail = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, 1, row.due_date, step=loan.rounding_step)[0]
+        tail = build_loan_schedule(loan.loan_type, rest, loan.interest_rate, 1, row.due_date, step=loan.rounding_step, term_unit=loan.term_unit or "monthly")[0]
         loan.schedules.append(
             PaymentSchedule(
                 due_date=tail["due_date"], original_due_date=tail["due_date"],
@@ -1533,6 +1574,7 @@ def deliver_loan_schedule(loan):
         "borrower_name": borrower.name, "loan_reference": reference,
         "principal_amount": str(loan.principal_amount), "interest_rate": str(loan.interest_rate),
         "term_months": loan.term_months,
+        "term_unit": loan.term_unit or "monthly",
     })
     rows = [
         {

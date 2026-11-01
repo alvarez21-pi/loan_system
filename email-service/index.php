@@ -28,7 +28,7 @@ if (!filter_var($to, FILTER_VALIDATE_EMAIL) || !in_array($type, $allowed, true))
 $required = [
     'verification' => ['name', 'verify_link'],
     'password_reset' => ['name', 'reset_link'],
-    'loan_approved' => ['borrower_name', 'loan_reference', 'principal_amount', 'interest_rate', 'term_months'],
+    'loan_approved' => ['borrower_name', 'loan_reference', 'principal_amount', 'interest_rate', 'term_months', 'term_unit'],
     'payment_reminder' => ['borrower_name', 'loan_reference', 'amount_due', 'due_date'],
     'payment_received' => ['borrower_name', 'loan_reference', 'amount_paid', 'balance_remaining', 'payment_date'],
     'new_user_notice' => ['name', 'role'],
@@ -46,7 +46,7 @@ foreach ($required[$type] as $field) {
 $sent = match ($type) {
     'verification' => Email::sendVerificationEmail($data['name'], $to, $data['verify_link']),
     'password_reset' => Email::sendPasswordResetEmail($data['name'], $to, $data['reset_link']),
-    'loan_approved' => Email::sendLoanApprovedNotification($data['borrower_name'], $data['loan_reference'], $data['principal_amount'], $data['interest_rate'], $data['term_months'], $to),
+    'loan_approved' => Email::sendLoanApprovedNotification($data['borrower_name'], $data['loan_reference'], $data['principal_amount'], $data['interest_rate'], $data['term_months'], $data['term_unit'], $to),
     'payment_reminder' => Email::sendPaymentReminderEmail($data['borrower_name'], $data['loan_reference'], $data['amount_due'], $data['due_date'], $to),
     'payment_received' => Email::sendPaymentReceivedConfirmation($data['borrower_name'], $data['loan_reference'], $data['amount_paid'], $data['balance_remaining'], $data['payment_date'], $to),
     'new_user_notice' => Email::sendNewUserCredentialsNotice($data['name'], $to, $data['role']),

@@ -204,6 +204,46 @@ def test_loan_edit_applies_immediately_with_no_approval_step_and_is_audited(clie
     assert "interest_rate" in audited.details and "term_months" in audited.details
 
 
+def test_start_date_edit_recalculates_unpaid_dates_and_audits(client, staff):
+    _, headers = staff
+    loan_id = make_active_loan(client, headers, "date-edit", term=3)
+    response = client.put(f"/api/loans/{loan_id}", json={"start_date": "2026-03-01"}, headers=headers["maker"])
+    assert response.status_code == 200, response.get_json()
+    updated = get_loan(client, headers, loan_id)
+    assert [r["due_date"] for r in open_rows(updated)] == ["2026-04-01", "2026-05-01", "2026-06-01"]
+    assert AuditLog.query.filter_by(table_name="loans", record_id=loan_id, action="EDIT").first() is not None
+
+
+def test_loans_list_defaults_to_active_and_exposes_settled_closing_date(client, staff):
+    _, headers = staff
+    loan_id = make_active_loan(client, headers, "filter-list", term=12)
+    from extensions import db
+    from models import Loan
+    Loan.query.filter_by(id=loan_id).update({"status": "closed"})
+    db.session.commit()
+    assert client.get("/api/loans?status=active", headers=headers["maker"]).get_json()["loans"] == []
+    settled = client.get("/api/loans?status=closed", headers=headers["maker"]).get_json()["loans"]
+    assert settled[0]["id"] == loan_id
+    assert settled[0]["closing_date"] == "2027-01-15"
+
+
+def test_dashboard_returns_due_soon_overdue_and_closing_items(client, staff, monkeypatch):
+    _, headers = staff
+    loan_id = make_active_loan(client, headers, "notice-list", term=3, start="2026-10-01")
+    from datetime import date
+    from extensions import db
+    from models import PaymentSchedule
+    from routes import resources
+    monkeypatch.setattr(resources, "local_today", lambda: date(2026, 10, 27))
+    rows = PaymentSchedule.query.filter_by(loan_id=loan_id).order_by(PaymentSchedule.due_date).all()
+    rows[0].due_date, rows[1].due_date, rows[2].due_date = date(2026, 10, 26), date(2026, 10, 30), date(2026, 11, 1)
+    db.session.commit()
+    notices = client.get("/api/dashboard/summary", headers=headers["maker"]).get_json()["notices"]
+    assert any(item["loan_id"] == loan_id for item in notices["overdue"])
+    assert any(item["loan_id"] == loan_id for item in notices["due_soon"])
+    assert any(item["loan_id"] == loan_id for item in notices["closing_soon"])
+
+
 def test_editing_an_active_loan_with_repayments_never_touches_past_repayments(client, staff):
     _, headers = staff
     loan_id = make_active_loan(client, headers, "e2", principal=1_200_000, rate=10, term=12)
@@ -333,3 +373,25 @@ def test_calculator_preview_matches_a_real_interest_only_loan_exactly(client, st
     # for months 1..N-1, the lump-sum principal landing only on the last.
     assert all(Decimal(str(row["principal_portion"])) == Decimal("0") for row in preview_rows[:-1])
     assert Decimal(str(preview_rows[-1]["principal_portion"])) == Decimal("450000")
+
+
+@pytest.mark.parametrize(
+    ("unit", "term", "dates", "interests", "total_interest"),
+    [
+        ("weekly", 4, ["2026-11-08", "2026-11-15", "2026-11-22", "2026-11-29"], [25000, 18975, 12800, 6470], 63245),
+        ("daily", 5, ["2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06"], [3334, 2668, 2001, 1331, 658], 9992),
+    ],
+)
+def test_calculator_preview_matches_expected_weekly_and_daily_schedules(client, staff, unit, term, dates, interests, total_interest):
+    _, headers = staff
+    response = client.post("/api/loan-calculator/preview", json={
+        "principal": 1_000_000, "interest_rate": 10, "term_months": term,
+        "term_unit": unit, "loan_type": "reducing_balance", "start_date": "2026-11-01",
+    }, headers=headers["maker"])
+    assert response.status_code == 200, response.get_json()
+    result = response.get_json()
+    rows = result["schedule"]
+    assert [row["due_date"] for row in rows] == dates
+    assert [row["interest_portion"] for row in rows] == interests
+    assert result["totals"]["total_interest"] == total_interest
+    assert rows[-1]["due_date"] == dates[-1]

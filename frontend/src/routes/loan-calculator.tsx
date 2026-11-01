@@ -21,14 +21,15 @@ export const Route = createFileRoute("/loan-calculator")({
 });
 
 function CalculatorPage() {
-  const [form, setForm] = useState({ loan_type: "reducing_balance", principal: "", interest_rate: "", term_months: "", start_date: today() });
+  const [form, setForm] = useState({ loan_type: "reducing_balance", principal: "", interest_rate: "", term_months: "", term_unit: "monthly", start_date: today() });
+  const termUnitLabel = form.term_unit === "daily" ? "days" : form.term_unit === "weekly" ? "weeks" : "months";
   const [result, setResult] = useState<any>(null);
   const [busy, setBusy] = useState(false);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!Number(form.principal) || form.interest_rate === "" || !Number(form.term_months)) {
-      showToast("Enter the principal, the monthly interest rate and the term in months.", "danger");
+      showToast(`Enter the principal, the monthly interest rate and the term in ${termUnitLabel}.`, "danger");
       return;
     }
     setBusy(true);
@@ -43,6 +44,7 @@ function CalculatorPage() {
           principal: Number(form.principal),
           interest_rate: Number(form.interest_rate),
           term_months: Number(form.term_months),
+          term_unit: form.term_unit,
           loan_type: form.loan_type,
           start_date: form.start_date || undefined,
         }),
@@ -72,7 +74,14 @@ function CalculatorPage() {
             <Field label="Monthly Interest Rate (%)">
               <NumberInput decimals={2} value={form.interest_rate} onValueChange={(v) => setForm({ ...form, interest_rate: v })} />
             </Field>
-            <Field label="Term (months)">
+            <Field label="Term unit">
+              <Select value={form.term_unit} onChange={(e: any) => setForm({ ...form, term_unit: e.target.value })}>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </Select>
+            </Field>
+            <Field label={`Term (${termUnitLabel})`}>
               <NumberInput integer value={form.term_months} onValueChange={(v) => setForm({ ...form, term_months: v })} />
             </Field>
             <Field label="Start date">

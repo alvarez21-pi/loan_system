@@ -71,6 +71,7 @@ class Loan(db.Model):
     # per-period EMI rate. Never an annual rate; nothing divides it by 12.
     interest_rate = db.Column(db.Numeric(*RATE), nullable=False, comment="Monthly interest rate in percent (10 = 10% per month)")
     term_months = db.Column(db.Integer, nullable=False)
+    term_unit = db.Column(db.String(10), nullable=False, default="monthly", server_default="monthly")
     # 'reducing_balance' (EMI, the original/default) or 'interest_only'
     # (interest-only instalments, full remaining principal due as a lump
     # sum in the final month). Drives which services.loan_calculator

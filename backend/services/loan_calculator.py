@@ -1,6 +1,6 @@
 from calendar import monthrange
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 
@@ -79,7 +79,36 @@ def add_months(start_date, months):
     return date(year, month, day)
 
 
-def amortization_schedule(principal, interest_rate, term_months, start_date=None, step=DEFAULT_ROUNDING_STEP):
+def period_interest_rate(monthly_percent, term_unit):
+    """Convert the monthly percentage to the chosen instalment period."""
+    # Centralized proration: daily is 1/30 month, weekly is 1/4 month.
+    monthly_percent = Decimal(str(monthly_percent))
+    if term_unit == "monthly":
+        return monthly_percent / HUNDRED
+    if term_unit == "daily":
+        return monthly_percent / HUNDRED / Decimal("30")
+    if term_unit == "weekly":
+        return monthly_percent / HUNDRED / Decimal("4")
+    raise ValueError("term_unit must be daily, weekly, or monthly")
+
+
+def term_in_months(instalments, term_unit):
+    """Express an instalment count in months for existing monthly product bounds."""
+    divisor = {"daily": Decimal("30"), "weekly": Decimal("4"), "monthly": Decimal("1")}.get(term_unit)
+    if divisor is None:
+        raise ValueError("term_unit must be daily, weekly, or monthly")
+    return Decimal(str(instalments)) / divisor
+
+
+def period_due_date(start_date, period, term_unit):
+    if term_unit == "daily":
+        return start_date + timedelta(days=period)
+    if term_unit == "weekly":
+        return start_date + timedelta(days=7 * period)
+    return add_months(start_date, period)
+
+
+def amortization_schedule(principal, interest_rate, term_months, start_date=None, step=DEFAULT_ROUNDING_STEP, term_unit="monthly"):
     """EMI / reducing-balance schedule, in whole shillings, rounded UP only.
 
     interest_rate is a MONTHLY percentage (10 means 10% per month) and is used
@@ -107,7 +136,7 @@ def amortization_schedule(principal, interest_rate, term_months, start_date=None
     if principal <= 0 or term_months <= 0 or monthly_percent < 0:
         raise ValueError("principal, interest_rate, and term_months are invalid")
 
-    monthly_rate = monthly_percent / HUNDRED  # percent -> fraction, already per month
+    monthly_rate = monthly_percent / HUNDRED if term_unit == "monthly" else period_interest_rate(monthly_percent, term_unit)
     if monthly_rate == 0:
         exact_emi = principal / term_months
     else:
@@ -132,8 +161,9 @@ def amortization_schedule(principal, interest_rate, term_months, start_date=None
         schedule.append(
             {
                 "period": period,
-                "due_date_offset_months": period,
-                "due_date": add_months(start_date, period) if start_date else None,
+                **({"due_date_offset_periods": period} if term_unit != "monthly" else {}),
+                "due_date_offset_months": period if term_unit == "monthly" else None,
+                "due_date": period_due_date(start_date, period, term_unit) if start_date else None,
                 "principal_portion": principal_portion,
                 "interest_portion": interest,
                 "payment_amount": payment_amount,
@@ -148,7 +178,7 @@ def amortization_schedule(principal, interest_rate, term_months, start_date=None
     return schedule
 
 
-def interest_only_schedule(principal, interest_rate, term_months, start_date=None, step=DEFAULT_ROUNDING_STEP):
+def interest_only_schedule(principal, interest_rate, term_months, start_date=None, step=DEFAULT_ROUNDING_STEP, term_unit="monthly"):
     """Interest-only schedule: months 1..N-1 are interest on the current
     outstanding principal (which does not reduce in this phase, except via
     an extra payment handled elsewhere in apply_repayment() — never here);
@@ -173,7 +203,7 @@ def interest_only_schedule(principal, interest_rate, term_months, start_date=Non
     if principal <= 0 or term_months <= 0 or monthly_percent < 0:
         raise ValueError("principal, interest_rate, and term_months are invalid")
 
-    monthly_rate = monthly_percent / HUNDRED
+    monthly_rate = monthly_percent / HUNDRED if term_unit == "monthly" else period_interest_rate(monthly_percent, term_unit)
     balance = principal
     schedule = []
     for period in range(1, term_months + 1):
@@ -188,8 +218,9 @@ def interest_only_schedule(principal, interest_rate, term_months, start_date=Non
         schedule.append(
             {
                 "period": period,
-                "due_date_offset_months": period,
-                "due_date": add_months(start_date, period) if start_date else None,
+                **({"due_date_offset_periods": period} if term_unit != "monthly" else {}),
+                "due_date_offset_months": period if term_unit == "monthly" else None,
+                "due_date": period_due_date(start_date, period, term_unit) if start_date else None,
                 "principal_portion": principal_portion,
                 "interest_portion": interest,
                 "payment_amount": payment_amount,
@@ -202,13 +233,13 @@ def interest_only_schedule(principal, interest_rate, term_months, start_date=Non
 LOAN_TYPES = ("reducing_balance", "interest_only")
 
 
-def build_loan_schedule(loan_type, principal, interest_rate, term_months, start_date=None, step=DEFAULT_ROUNDING_STEP):
+def build_loan_schedule(loan_type, principal, interest_rate, term_months, start_date=None, step=DEFAULT_ROUNDING_STEP, term_unit="monthly"):
     """The one dispatch point every caller uses instead of choosing between
     amortization_schedule()/interest_only_schedule() itself — so a new loan
     type only ever needs to be wired in here."""
     if loan_type == "interest_only":
-        return interest_only_schedule(principal, interest_rate, term_months, start_date, step=step)
-    return amortization_schedule(principal, interest_rate, term_months, start_date, step=step)
+        return interest_only_schedule(principal, interest_rate, term_months, start_date, step=step, term_unit=term_unit)
+    return amortization_schedule(principal, interest_rate, term_months, start_date, step=step, term_unit=term_unit)
 
 
 def schedule_totals(triples):

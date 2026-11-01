@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import AppShell from "../components/AppShell";
 import { Card, DataTable, InlineNote, PageHeader, StatCard, StatusBadge, fmtNumber, money } from "../components/lms-ui";
 import useResource from "../hooks/useResource.js";
-import { auditLogs, backup, borrowers, capital, getUser, hasPermission, loans } from "../lib/api";
+import { auditLogs, backup, borrowers, capital, dashboard, getUser, hasPermission, loans } from "../lib/api";
 
 export const Route = createFileRoute("/dashboard")({
   head: () => ({
@@ -30,6 +30,7 @@ function DashboardPage() {
   // Active only — a deactivated borrower shouldn't count toward this figure.
   const b = useResource(() => borrowers.list({ active_only: true }), []);
   const l = useResource(() => loans.list(), []);
+  const noticeData = useResource(() => dashboard.summary(), []);
   const a = useResource(() => (canSeeAudit ? auditLogs.list() : Promise.resolve({ data: [] })), []);
   const capitalSummary = useResource(() => (canSeeCapital ? capital.summary() : Promise.resolve({ data: null })), []);
   const backupStatus = useResource(() => (canSeeBackup ? backup.status() : Promise.resolve({ data: null })), [canSeeBackup]);
@@ -44,6 +45,7 @@ function DashboardPage() {
     0,
   );
   const cs: any = capitalSummary.data;
+  const notices: any = (noticeData.data as any)?.notices || {};
 
   return (
     <>
@@ -64,6 +66,17 @@ function DashboardPage() {
         <StatCard label="Active loans" value={fmtNumber(active)} />
         <StatCard label="Pending approvals" value={fmtNumber(pending)} hint="Loans awaiting a checker" />
         <StatCard label="Outstanding balance" value={money(outstanding)} />
+      </div>
+
+      <div className="mt-6 grid gap-4 xl:grid-cols-3">
+        {([["Payments due in the next 7 days", notices.due_soon || [], false], ["Overdue payments", notices.overdue || [], true], ["Loans closing soon", notices.closing_soon || [], false]] as any[]).map(([title, rows, urgent]) => (
+          <Card key={title} title={title}>
+            {rows.length ? rows.map((item: any, index: number) => <div key={`${item.loan_id}-${item.due_date}-${index}`} className={`border-b py-2 text-sm ${urgent ? "text-red-700" : ""}`}>
+              <Link to="/loans/$id" params={{ id: String(item.loan_id) }} className="font-medium underline">{item.borrower_name} · {item.reference}</Link>
+              <div>{money(item.amount_due)} · {item.due_date} · {urgent ? `${Math.abs(item.days)} days overdue` : `${item.days} days remaining`}</div>
+            </div>) : <p className="text-sm text-muted-foreground">None</p>}
+          </Card>
+        ))}
       </div>
 
       {canSeeCapital ? (
@@ -109,6 +122,7 @@ function DashboardPage() {
               },
               { key: "borrower_name", label: "Borrower", render: (r: any) => r.borrower_name || "—" },
               { key: "principal_amount", label: "Principal", render: (r: any) => money(r.principal_amount) },
+              { key: "dates", label: "Start / Closing", render: (r: any) => `${r.start_date || "—"} / ${r.closing_date || "—"}` },
               { key: "status", label: "Status", render: (r: any) => <StatusBadge status={r.status} /> },
             ]}
           />

@@ -228,9 +228,10 @@ final class Email
         return self::send($email, $name, 'Reset your password', $html);
     }
 
-    public static function sendLoanApprovedNotification(string $borrowerName, string $loanReference, string $principalAmount, string $interestRate, string $termMonths, string $email): bool
+    public static function sendLoanApprovedNotification(string $borrowerName, string $loanReference, string $principalAmount, string $interestRate, string $termMonths, string $termUnit, string $email): bool
     {
-        $html = self::shell(self::header('Loan approved') . '<tr><td style="padding:24px"><p>Hello ' . htmlspecialchars($borrowerName) . ',</p><p>Your loan has been approved.</p>' . self::referenceBox($loanReference) . '<table width="100%" cellspacing="0" cellpadding="0">' . self::detailRow('Principal', $principalAmount, true) . self::detailRow('Monthly interest rate', $interestRate . '% per month') . self::detailRow('Term', $termMonths . ' months', true) . '</table></td></tr>' . self::footer());
+        $termLabel = ['daily' => 'days', 'weekly' => 'weeks', 'monthly' => 'months'][$termUnit] ?? 'months';
+        $html = self::shell(self::header('Loan approved') . '<tr><td style="padding:24px"><p>Hello ' . htmlspecialchars($borrowerName) . ',</p><p>Your loan has been approved.</p>' . self::referenceBox($loanReference) . '<table width="100%" cellspacing="0" cellpadding="0">' . self::detailRow('Principal', $principalAmount, true) . self::detailRow('Monthly interest rate', $interestRate . '% per month') . self::detailRow('Term', $termMonths . ' ' . $termLabel, true) . '</table></td></tr>' . self::footer());
         return self::send($email, $borrowerName, 'Loan approved: ' . $loanReference, $html);
     }
 

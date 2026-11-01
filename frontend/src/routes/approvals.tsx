@@ -120,10 +120,10 @@ function ApprovalsPage() {
                 { key: "borrower_name", label: "Borrower" },
                 { key: "principal_amount", label: "Principal", render: (r: any) => money(r.principal_amount) },
                 { key: "interest_rate", label: "Monthly Rate (%)", render: (r: any) => percent(r.interest_rate) },
-                { key: "term_months", label: "Term (months)", render: (r: any) => fmtNumber(r.term_months) },
+                { key: "term_months", label: "Term", render: (r: any) => `${fmtNumber(r.term_months)} ${r.term_unit === "daily" ? "days" : r.term_unit === "weekly" ? "weeks" : "months"}` },
                 { key: "creator_name_snapshot", label: "Created by" },
                 decisionColumn("Loan", "loan", loans, loanQueue, (r) =>
-                  `This will approve Loan #${r.id} for ${r.borrower_name}: ${money(r.principal_amount)} at ${percent(r.interest_rate)} per month over ${fmtNumber(r.term_months)} months, and send the schedule to the borrower.`),
+                  `This will approve Loan #${r.id} for ${r.borrower_name}: ${money(r.principal_amount)} at ${percent(r.interest_rate)} per month over ${fmtNumber(r.term_months)} ${r.term_unit === "daily" ? "days" : r.term_unit === "weekly" ? "weeks" : "months"}, and send the schedule to the borrower.`),
               ]}
             />
           </Card>

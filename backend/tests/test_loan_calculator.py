@@ -197,3 +197,31 @@ def test_interest_only_step_is_accepted_but_never_applied():
 def test_build_loan_schedule_dispatches_on_loan_type():
     assert build_loan_schedule("interest_only", "1200000", "10", 12) == interest_only_schedule("1200000", "10", 12)
     assert build_loan_schedule("reducing_balance", "1200000", "10", 12) == amortization_schedule("1200000", "10", 12)
+
+
+def test_monthly_default_schedule_regression_is_unchanged():
+    from datetime import date
+    # Existing monthly calculation and dates remain exactly as before.
+    rows = build_loan_schedule("reducing_balance", "1000000", "10", 2, date(2026, 1, 31))
+    assert [r["payment_amount"] for r in rows] == [Decimal("577000"), Decimal("575300")]
+    assert [r["interest_portion"] for r in rows] == [Decimal("100000"), Decimal("52300")]
+    assert [r["due_date"].isoformat() for r in rows] == ["2026-02-28", "2026-03-31"]
+
+
+def test_daily_and_weekly_schedules_prorate_interest_and_space_dates():
+    from datetime import date
+    daily = build_loan_schedule("interest_only", "300000", "12", 2, date(2026, 1, 1), term_unit="daily")
+    weekly = build_loan_schedule("interest_only", "300000", "12", 2, date(2026, 1, 1), term_unit="weekly")
+    assert [r["due_date"].isoformat() for r in daily] == ["2026-01-02", "2026-01-03"]
+    assert [r["due_date"].isoformat() for r in weekly] == ["2026-01-08", "2026-01-15"]
+    assert [r["due_date_offset_periods"] for r in weekly] == [1, 2]
+    assert all(r["due_date_offset_months"] is None for r in weekly)
+    assert daily[0]["interest_portion"] == Decimal("1200")
+    assert weekly[0]["interest_portion"] == Decimal("9000")
+
+
+def test_instalment_count_converts_to_months_for_existing_product_limits():
+    from services.loan_calculator import term_in_months
+    assert term_in_months(30, "daily") == Decimal("1")
+    assert term_in_months(4, "weekly") == Decimal("1")
+    assert term_in_months(6, "monthly") == Decimal("6")

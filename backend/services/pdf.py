@@ -202,7 +202,7 @@ def schedule_pdf(loan):
                     "Monthly Interest Rate",
                     f"{loan.interest_rate}% per month ({'interest-only' if loan.loan_type == 'interest_only' else 'reducing balance'})",
                 ],
-                ["Start date", loan.start_date.isoformat(), "Term", f"{loan.term_months} months"],
+                ["Start date", loan.start_date.isoformat(), "Term", f"{loan.term_months} { {'daily': 'days', 'weekly': 'weeks', 'monthly': 'months'}.get(loan.term_unit or 'monthly', 'months')}"],
                 ["Status", str(loan.status).replace("_", " ").title(), "Outstanding balance", fmt_money(loan.outstanding_balance)],
             ],
             [28 * mm, 55 * mm, 38 * mm, 55 * mm],
