@@ -22,6 +22,23 @@ export const Route = createFileRoute("/dashboard")({
 
 const PENDING = ["pending", "pending_approval", "submitted"];
 
+function groupByLoan(rows: any[]) {
+  const groups = new Map<string, any[]>();
+  for (const item of rows) {
+    const key = String(item.loan_id);
+    groups.set(key, [...(groups.get(key) || []), item]);
+  }
+  return [...groups.values()]
+    .map((items) => items.sort((a, b) => a.due_date.localeCompare(b.due_date)))
+    .sort((a, b) => a[0].due_date.localeCompare(b[0].due_date));
+}
+
+function dueLabel(days: number) {
+  if (days === 0) return "Due today";
+  if (days === 1) return "Due tomorrow";
+  return `${days} days remaining`;
+}
+
 function DashboardPage() {
   const user = getUser();
   const canSeeAudit = hasPermission(user, "audit:view");
@@ -69,16 +86,37 @@ function DashboardPage() {
       </div>
 
       <div className="mt-6 grid gap-4 xl:grid-cols-3">
-        {([["Payments due in the next 7 days", notices.due_soon || [], false], ["Overdue payments", notices.overdue || [], true], ["Loans closing soon", notices.closing_soon || [], false]] as any[]).map(([title, rows, urgent]) => (
-          <Card key={title} title={title}>
-            {rows.length ? rows.map((item: any, index: number) => <div key={`${item.loan_id}-${item.due_date}-${index}`} className={`border-b py-2 text-sm ${urgent ? "text-red-700" : ""}`}>
-              <Link to="/loans/$id" params={{ id: String(item.loan_id) }} className="font-medium underline">{item.borrower_name} · {item.reference}</Link>
-              <div>{money(item.amount_due)} · {item.due_date} · {urgent ? `${Math.abs(item.days)} days overdue` : `${item.days} days remaining`}</div>
-            </div>) : <p className="text-sm text-muted-foreground">None</p>}
-          </Card>
-        ))}
+        <Card title="Payments due in the next 7 days">
+          {groupByLoan(notices.due_soon || []).length ? groupByLoan(notices.due_soon || []).map((items) => {
+            const next = items[0];
+            const additional = items.slice(1);
+            const additionalTotal = additional.reduce((sum, item) => sum + Number(item.amount_due), 0);
+            return <div key={next.loan_id} className="border-b py-2 text-sm">
+              <Link to="/loans/$id" params={{ id: String(next.loan_id) }} className="font-medium underline">{next.borrower_name} · {next.reference}</Link>
+              <div>{money(next.amount_due)} · {next.due_date} · {dueLabel(next.days)}</div>
+              {additional.length ? <div>+{additional.length} more this week ({money(additionalTotal)} combined)</div> : null}
+            </div>;
+          }) : <p className="text-sm text-muted-foreground">None</p>}
+        </Card>
+        <Card title="Overdue payments">
+          {groupByLoan(notices.overdue || []).length ? groupByLoan(notices.overdue || []).map((items) => {
+            const oldest = items[0];
+            const total = items.reduce((sum, item) => sum + Number(item.amount_due), 0);
+            const days = Math.abs(oldest.days);
+            return <div key={oldest.loan_id} className="border-b py-2 text-sm text-red-700">
+              <Link to="/loans/$id" params={{ id: String(oldest.loan_id) }} className="font-medium underline">{oldest.borrower_name} · {oldest.reference}</Link>
+              <div>{items.length} overdue instalment{items.length === 1 ? "" : "s"}; total {money(total)}</div>
+              <div>Oldest: {money(oldest.amount_due)} · {oldest.due_date} · {days} day{days === 1 ? "" : "s"} overdue</div>
+            </div>;
+          }) : <p className="text-sm text-muted-foreground">None</p>}
+        </Card>
+        <Card title="Loans closing soon">
+          {(notices.closing_soon || []).length ? notices.closing_soon.map((item: any, index: number) => <div key={`${item.loan_id}-${item.due_date}-${index}`} className="border-b py-2 text-sm">
+            <Link to="/loans/$id" params={{ id: String(item.loan_id) }} className="font-medium underline">{item.borrower_name} · {item.reference}</Link>
+            <div>{money(item.amount_due)} · {item.due_date} · {dueLabel(item.days)}</div>
+          </div>) : <p className="text-sm text-muted-foreground">None</p>}
+        </Card>
       </div>
-
       {canSeeCapital ? (
         <div className="mt-6">
           <Card
